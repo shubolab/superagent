@@ -4,6 +4,12 @@ package superagent
 import "github.com/shubolab/superagent/internal/contract"
 
 type (
+	ArtifactRef                 = contract.ArtifactRef
+	ArtifactPage                = contract.ArtifactPage
+	ArtifactCall                = contract.ArtifactCall
+	ArtifactOwner               = contract.ArtifactOwner
+	ArtifactWriter              = contract.ArtifactWriter
+	ArtifactStore               = contract.ArtifactStore
 	CapabilityEnforcement       = contract.CapabilityEnforcement
 	EnvironmentReadCapabilities = contract.EnvironmentReadCapabilities
 	EnvironmentReadDescriptor   = contract.EnvironmentReadDescriptor
@@ -76,6 +82,8 @@ type (
 )
 
 const (
+	ArtifactMaxBlockBytes             = contract.ArtifactMaxBlockBytes
+	StopToolRawOutputLimit            = contract.StopToolRawOutputLimit
 	CapabilityEnforced                = contract.CapabilityEnforced
 	CapabilityMeasured                = contract.CapabilityMeasured
 	CapabilityUnavailable             = contract.CapabilityUnavailable
@@ -133,6 +141,10 @@ const (
 )
 
 var (
+	ErrArtifactUnavailable           = contract.ErrArtifactUnavailable
+	ErrArtifactCapacity              = contract.ErrArtifactCapacity
+	ErrArtifactOutputLimit           = contract.ErrArtifactOutputLimit
+	ErrArtifactReceipt               = contract.ErrArtifactReceipt
 	ErrEnvironmentBusy               = contract.ErrEnvironmentBusy
 	ErrContextSourceUnavailable      = contract.ErrContextSourceUnavailable
 	ErrContextMeasurementUnavailable = contract.ErrContextMeasurementUnavailable

@@ -21,7 +21,7 @@ const (
 )
 
 func (r *Runner) ConfigureTools(ref contract.RunnerRef, transport mesh.MeshTransport, cfg contract.RunnerConfig,
-	tools map[contract.ToolRef]contract.LocalToolBinding, environments map[contract.EnvironmentRef]contract.EnvironmentProvider) error {
+	tools map[contract.ToolRef]contract.LocalToolBinding, environments map[contract.EnvironmentRef]contract.EnvironmentProvider, artifactStore bool) error {
 	r.ref, r.devices = ref, transport
 	if cfg.DefaultEnvironment != "" {
 		if _, ok := environments[cfg.DefaultEnvironment]; !ok {
@@ -41,6 +41,9 @@ func (r *Runner) ConfigureTools(ref contract.RunnerRef, transport mesh.MeshTrans
 			if subject == "" || !ok {
 				return fmt.Errorf("%w: invalid tool permission for %q", contract.ErrInvalidConfiguration, tool)
 			}
+			if binding.Spec.NeedsArtifactOutput != permission.AllowArtifacts || (permission.AllowArtifacts && !artifactStore) {
+				return fmt.Errorf("%w: invalid artifact grant for %q", contract.ErrInvalidConfiguration, tool)
+			}
 			if binding.Spec.NeedsReadAccess {
 				env, registered := environments[permission.Environment.Ref]
 				if !registered || permission.Environment.Workspace == "" ||
@@ -53,7 +56,7 @@ func (r *Runner) ConfigureTools(ref contract.RunnerRef, transport mesh.MeshTrans
 					!declares.AllowsPrefix(permission.Environment.Workspace, permission.ReadPrefix) {
 					return fmt.Errorf("%w: workspace does not declare requested prefix for %q", contract.ErrInvalidConfiguration, tool)
 				}
-			} else if permission != (contract.ToolPermission{}) {
+			} else if permission.Environment != (contract.EnvironmentRequirement{}) || permission.ReadPrefix != "" {
 				return fmt.Errorf("%w: unexpected workspace permission for %q", contract.ErrInvalidConfiguration, tool)
 			}
 		}
@@ -122,9 +125,11 @@ func (r *Runner) modelTools(refs []contract.ToolRef) []contract.ModelTool {
 }
 
 type activity struct {
-	transport mesh.MeshTransport
-	env       mesh.EnvironmentRequest
-	readCap   uint64
+	transport      mesh.MeshTransport
+	env            mesh.EnvironmentRequest
+	readCap        uint64
+	usedArtifacts  bool
+	cleanupPending bool
 }
 
 func (r *Runner) newActivity(s *state, subject contract.SubjectID) *activity {
@@ -167,12 +172,18 @@ func (a *activity) allocate(s *state) bool {
 
 func (a *activity) finish(s *state) {
 	var cleanup contract.CleanupStatus
+	if a.usedArtifacts {
+		cleanup = contract.CleanupReleased
+	}
 	if a.env.Handle != "" {
 		_, err := cleanupCall(a.transport, mesh.ReleaseEnvironment, a.env)
 		cleanup = contract.CleanupReleased
 		if err != nil {
 			cleanup = contract.CleanupPending
 		}
+	}
+	if a.cleanupPending {
+		cleanup = contract.CleanupPending
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -231,10 +242,17 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	}
 	reject := func(code string) (contract.ToolResult, bool) {
 		result := skippedTool(req, code)
-		return result, s.settleTool(balance, req, result, contract.ToolStatusRejected, false, 0, true)
+		return result, s.settleTool(balance, req, result, contract.ToolStatusRejected, false, 0, true, 0)
 	}
 	if !allowed {
 		return reject("tool_not_authorized")
+	}
+	if binding.Spec.NeedsArtifactOutput {
+		req.Limits.MaxRawOutputBytes = min(balance.raw, binding.Spec.Limits.MaxRawOutputBytes)
+		if req.Limits.MaxRawOutputBytes == 0 {
+			s.failTool(contract.StopToolRawOutputLimit, call.CallID, s.budget.raw)
+			return contract.ToolResult{}, false
+		}
 	}
 	e := a.env
 	e.Call = contract.CallScope{Run: e.Run, CallID: call.CallID, Tool: call.Tool, Handle: e.Handle, Limits: req.Limits}
@@ -265,11 +283,28 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 		e.Grant, req.EnvironmentGrant = grant.Grant, grant.Grant
 	}
 
+	if binding.Spec.NeedsArtifactOutput {
+		reply, err := mesh.CallComponent(s.ctx, a.transport, mesh.BeginArtifactOutput, e, contract.ToolRequest{})
+		if err != nil || reply.RawOutputBytes == 0 || reply.RawOutputBytes > req.Limits.MaxRawOutputBytes {
+			if e.Grant != "" {
+				_, _ = cleanupCall(a.transport, mesh.RevokeEnvironment, e)
+			}
+			return reject("artifact_capacity")
+		}
+		e.Call.Limits.MaxRawOutputBytes, req.Limits.MaxRawOutputBytes = reply.RawOutputBytes, reply.RawOutputBytes
+		a.usedArtifacts = true
+	}
+
 	s.mu.Lock()
 	if !s.runningLocked() {
 		s.mu.Unlock()
 		if e.Grant != "" {
 			_, _ = cleanupCall(a.transport, mesh.RevokeEnvironment, e)
+		}
+		if binding.Spec.NeedsArtifactOutput {
+			if _, err := cleanupCall(a.transport, mesh.SettleArtifactOutput, e); err != nil {
+				a.cleanupPending = true
+			}
 		}
 		return contract.ToolResult{}, false
 	}
@@ -290,13 +325,53 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 		meter, err := cleanupCall(a.transport, mesh.RevokeEnvironment, e)
 		measured, verified = meter.Scanned, err == nil && meter.Scanned <= req.Limits.MaxScanBytes
 	}
-	if verified && measured > 0 && result.State == contract.ToolExecutionNotExecuted {
+	var raw uint64
+	if binding.Spec.NeedsArtifactOutput {
+		result, raw = a.settleArtifact(e, req, result)
+	} else if result.Completion != nil && len(result.Completion.Artifacts) != 0 ||
+		result.Usage != nil && result.Usage.RawOutputBytes != nil {
+		result = contract.ToolResult{}
+	}
+	if (verified && measured > 0) && result.State == contract.ToolExecutionNotExecuted {
 		result = contract.ToolResult{}
 	}
 	if verified && e.Grant != "" && validToolResult(result, req.RunID, req.CallID) {
-		result.Usage = &contract.ToolUsage{ScannedBytes: &measured}
+		if result.Usage == nil {
+			result.Usage = &contract.ToolUsage{}
+		}
+		result.Usage.ScannedBytes = &measured
 	}
-	return result, s.settleTool(balance, req, result, toolStatus(result), true, measured, verified)
+	return result, s.settleTool(balance, req, result, toolStatus(result), true, measured, verified, raw)
+}
+
+func (a *activity) settleArtifact(e mesh.EnvironmentRequest, req contract.ToolRequest, result contract.ToolResult) (contract.ToolResult, uint64) {
+	if validToolResult(result, req.RunID, req.CallID) && result.State == contract.ToolExecutionKnown {
+		e.Artifacts = result.Completion.Artifacts
+	}
+	reply, err := cleanupCall(a.transport, mesh.SettleArtifactOutput, e)
+	if err != nil && (!errors.Is(err, contract.ErrArtifactReceipt) || errors.Is(err, contract.ErrArtifactCleanup)) {
+		a.cleanupPending = true
+	}
+	if err != nil || reply.RawOutputBytes > req.Limits.MaxRawOutputBytes {
+		used := req.Limits.MaxRawOutputBytes
+		if errors.Is(err, contract.ErrArtifactReceipt) && reply.RawOutputBytes <= used {
+			used = reply.RawOutputBytes
+		}
+		if len(e.Artifacts) != 0 {
+			return contract.ToolResult{}, used
+		}
+		return result, used
+	}
+	if reply.RawOutputBytes != 0 && result.State == contract.ToolExecutionNotExecuted {
+		return contract.ToolResult{}, reply.RawOutputBytes
+	}
+	if validToolResult(result, req.RunID, req.CallID) {
+		if result.Usage == nil {
+			result.Usage = &contract.ToolUsage{}
+		}
+		result.Usage.RawOutputBytes = &reply.RawOutputBytes
+	}
+	return result, reply.RawOutputBytes
 }
 
 type componentReply struct {
@@ -348,7 +423,7 @@ func cleanupCall(transport mesh.MeshTransport, op mesh.Operation, e mesh.Environ
 }
 
 func (s *state) settleTool(balance *limits, req contract.ToolRequest, result contract.ToolResult, status contract.ToolStatus,
-	dispatched bool, measured uint64, verified bool) bool {
+	dispatched bool, measured uint64, verified bool, raw uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	live := s.runningLocked()
@@ -360,6 +435,7 @@ func (s *state) settleTool(balance *limits, req contract.ToolRequest, result con
 		measured = req.Limits.MaxScanBytes
 	}
 	balance.scan -= measured
+	balance.raw -= raw
 	var code string
 	if !validToolResult(result, req.RunID, req.CallID) {
 		status = contract.ToolStatusUnknown
@@ -424,13 +500,19 @@ func receiptSize(result contract.ToolResult, limit uint64) (uint64, bool) {
 
 func validToolResult(result contract.ToolResult, run contract.RunID, call contract.CallID) bool {
 	if run == "" || result.RunID != run || result.CallID != call ||
-		(result.Reason != nil && (len(result.Reason.Code) == 0 || len(result.Reason.Code) > 64 || !utf8.ValidString(result.Reason.Code))) {
+		(result.Reason != nil && (len(result.Reason.Code) == 0 || len(result.Reason.Code) > 64 || !utf8.ValidString(result.Reason.Code) ||
+			len(result.Reason.Message) > 256 || !utf8.ValidString(result.Reason.Message))) {
 		return false
 	}
 	switch result.State {
 	case contract.ToolExecutionKnown:
-		if result.Completion == nil || !utf8.ValidString(result.Completion.Content) {
+		if result.Completion == nil || len(result.Completion.Artifacts) > 1 || !utf8.ValidString(result.Completion.Content) {
 			return false
+		}
+		for _, a := range result.Completion.Artifacts {
+			if a.ID == "" || len(a.ID) > 128 || a.Version == "" || len(a.Version) > 128 || len(a.SHA256) != 64 || a.ExpiresAt.IsZero() || a.ExpiresAt.Year() > 9999 || a.ExpiresAt.Year() < 0 {
+				return false
+			}
 		}
 		switch result.Completion.Outcome {
 		case contract.ToolSucceeded:

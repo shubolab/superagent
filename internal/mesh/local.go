@@ -24,6 +24,7 @@ type Local struct {
 	resolveCaller    func(context.Context) (contract.SubjectID, error)
 	tools            map[contract.ToolRef]contract.LocalToolBinding
 	environments     map[contract.EnvironmentRef]contract.EnvironmentProvider
+	artifacts        contract.ArtifactStore
 }
 
 func NewLocal(
@@ -72,6 +73,8 @@ func (l *Local) Call(ctx context.Context, req MeshRequest) (MeshReply, error) {
 		return MeshReply{Result: result}, err
 	case Cancel:
 		return MeshReply{}, runner.Cancel(ctx, subject, req.RunID)
+	case ReadArtifact:
+		return l.readArtifact(ctx, subject, req)
 	case ReadContextSource:
 		reader, ok := runner.(interface {
 			ReadSource(context.Context, contract.SubjectID, contract.RunID, ContextSourceRequest) (contract.ContextSourcePage, error)

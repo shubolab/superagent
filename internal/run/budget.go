@@ -14,6 +14,7 @@ type limits struct {
 	output        uint64
 	toolRequests  uint64
 	scan          uint64
+	raw           uint64
 }
 
 func configuredBudget(b contract.Budget) (limits, bool) {
@@ -22,7 +23,7 @@ func configuredBudget(b contract.Budget) (limits, bool) {
 	}
 	l := limits{
 		timeout: *b.Timeout, modelRequests: *b.MaxModelRequests, modelInput: *b.MaxModelInputBytes, output: *b.MaxOutputBytes,
-		toolRequests: valueOr(b.MaxToolRequests, 0), scan: valueOr(b.MaxToolScanBytes, 0),
+		toolRequests: valueOr(b.MaxToolRequests, 0), scan: valueOr(b.MaxToolScanBytes, 0), raw: valueOr(b.MaxToolRawOutputBytes, 0),
 	}
 	return l, l.timeout > 0 && l.modelRequests > 0 && l.modelInput > 0 && l.output > 0
 }
@@ -35,6 +36,7 @@ func requestBudget(req contract.Budget, defaults, caps limits) (limits, bool) {
 		output:        min(valueOr(req.MaxOutputBytes, defaults.output), caps.output),
 		toolRequests:  min(valueOr(req.MaxToolRequests, defaults.toolRequests), caps.toolRequests),
 		scan:          min(valueOr(req.MaxToolScanBytes, defaults.scan), caps.scan),
+		raw:           min(valueOr(req.MaxToolRawOutputBytes, defaults.raw), caps.raw),
 	}
 	return l, l.timeout > 0 && l.modelRequests > 0 && l.modelInput > 0 && l.output > 0
 }

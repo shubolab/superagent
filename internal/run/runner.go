@@ -47,7 +47,7 @@ func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open 
 	defaults, defaultsOK := configuredBudget(cfg.DefaultBudget)
 	caps, capsOK := configuredBudget(cfg.BudgetCaps)
 	if !defaultsOK || !capsOK || defaults.timeout > caps.timeout || defaults.modelRequests > caps.modelRequests ||
-		defaults.modelInput > caps.modelInput || defaults.output > caps.output || defaults.toolRequests > caps.toolRequests || defaults.scan > caps.scan {
+		defaults.modelInput > caps.modelInput || defaults.output > caps.output || defaults.toolRequests > caps.toolRequests || defaults.scan > caps.scan || defaults.raw > caps.raw {
 		return nil, fmt.Errorf("%w: invalid default budget or caps", contract.ErrInvalidConfiguration)
 	}
 	if cfg.ObserveBufferBytes == 0 || cfg.ResultRetention <= 0 || open == nil {
@@ -251,12 +251,13 @@ func cloneMessages(in []contract.Message) []contract.Message {
 
 func cloneBudget(b contract.Budget) contract.Budget {
 	return contract.Budget{
-		Timeout:            copyValue(b.Timeout),
-		MaxModelRequests:   copyValue(b.MaxModelRequests),
-		MaxModelInputBytes: copyValue(b.MaxModelInputBytes),
-		MaxOutputBytes:     copyValue(b.MaxOutputBytes),
-		MaxToolRequests:    copyValue(b.MaxToolRequests),
-		MaxToolScanBytes:   copyValue(b.MaxToolScanBytes),
+		Timeout:               copyValue(b.Timeout),
+		MaxModelRequests:      copyValue(b.MaxModelRequests),
+		MaxModelInputBytes:    copyValue(b.MaxModelInputBytes),
+		MaxOutputBytes:        copyValue(b.MaxOutputBytes),
+		MaxToolRequests:       copyValue(b.MaxToolRequests),
+		MaxToolScanBytes:      copyValue(b.MaxToolScanBytes),
+		MaxToolRawOutputBytes: copyValue(b.MaxToolRawOutputBytes),
 	}
 }
 
@@ -295,10 +296,14 @@ func cloneAssistant(message *contract.AssistantMessage) *contract.AssistantMessa
 
 func cloneToolResult(result contract.ToolResult) contract.ToolResult {
 	result.Completion = copyValue(result.Completion)
+	if result.Completion != nil {
+		result.Completion.Artifacts = slices.Clone(result.Completion.Artifacts)
+	}
 	result.Reason = copyValue(result.Reason)
 	result.Usage = copyValue(result.Usage)
 	if result.Usage != nil {
 		result.Usage.ScannedBytes = copyValue(result.Usage.ScannedBytes)
+		result.Usage.RawOutputBytes = copyValue(result.Usage.RawOutputBytes)
 	}
 	return result
 }

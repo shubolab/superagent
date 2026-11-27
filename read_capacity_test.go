@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,5 +161,66 @@ func TestReadCapabilityMismatchStopsBeforeDispatch(t *testing.T) {
 	_, err := superagent.NewLocalReadEnvironmentWithOptions(nil, superagent.LocalReadEnvironmentOptions{})
 	if !errors.Is(err, superagent.ErrInvalidConfiguration) {
 		t.Fatalf("invalid capacity error = %v", err)
+	}
+}
+
+func TestReadAndArtifactOutputShareOneAuthorizedToolCall(t *testing.T) {
+	ctx := hostContext(t, "alice")
+	f, env := capacityFixture(t)
+	model := modelFunc(func(_ context.Context, req superagent.ModelRequest) (superagent.ModelStream, error) {
+		if req.Step == 1 {
+			return scripted(artifactCall("capture-file")), nil
+		}
+		return scripted(completed("ok")), nil
+	})
+	writer := compactTool(func(ctx context.Context, req superagent.ToolRequest) (superagent.ToolResult, error) {
+		reader, err := superagent.OpenToolFile(ctx, req, "docs/health.txt")
+		if err != nil {
+			return superagent.ToolResult{}, err
+		}
+		defer reader.Close()
+		w, err := superagent.OpenToolArtifact(ctx, req)
+		if err != nil {
+			return superagent.ToolResult{}, err
+		}
+		defer w.Close()
+		buf := make([]byte, 7)
+		n, err := io.ReadFull(reader, buf)
+		if err != nil {
+			return superagent.ToolResult{}, err
+		}
+		if _, err := w.Write(buf[:n]); err != nil {
+			return superagent.ToolResult{}, err
+		}
+		ref, err := w.Complete()
+		if err != nil {
+			return superagent.ToolResult{}, err
+		}
+		return artifactReceipt(req, ref), nil
+	})
+	cfg, _, _ := artifactFixture(t, model, writer)
+	cfg.LocalEnvironments = f.cfg.LocalEnvironments
+	b := cfg.LocalTools[outputTool]
+	b.Spec.NeedsReadAccess = true
+	b.Spec.Limits.MaxScanBytes = 32
+	b.Prepare = func(json.RawMessage) (string, error) { return "docs/health.txt", nil }
+	cfg.LocalTools[outputTool] = b
+	req := artifactRequest("both")
+	req.Environment = f.request().Environment
+	rc := cfg.LocalRunners["main"]
+	rc.DefaultBudget.MaxToolScanBytes = pointer(uint64(32))
+	rc.BudgetCaps.MaxToolScanBytes = pointer(uint64(32))
+	rc.AllowedTools["alice"][outputTool] = superagent.ToolPermission{Environment: *req.Environment, ReadPrefix: "docs", AllowArtifacts: true}
+	cfg.LocalRunners["main"] = rc
+	cfg.LocalEnvironments["local"] = env
+	run := start(t, ctx, newClient(t, cfg), req)
+	result := wait(t, ctx, run, superagent.Succeeded)
+	receipt := result.Messages[2].Tool.Result
+	if receipt.Usage == nil || *receipt.Usage.ScannedBytes != 7 || *receipt.Usage.RawOutputBytes != 7 || len(receipt.Completion.Artifacts) != 1 {
+		t.Fatalf("independent use not reported: %+v", receipt)
+	}
+	page, err := run.ReadArtifact(ctx, receipt.Completion.Artifacts[0], 0, 20)
+	if err != nil || string(page.Content) != "status=" || !page.EOF {
+		t.Fatalf("output did not reflect capped scan: %q, %+v, %v", page.Content, page, err)
 	}
 }

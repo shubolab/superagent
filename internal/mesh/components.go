@@ -14,7 +14,8 @@ func (l *Local) SetComponents(tools map[contract.ToolRef]contract.LocalToolBindi
 	for ref, binding := range tools {
 		if ref == "" || nilBinding(binding.Tool) || !contract.JSONObject(binding.Spec.InputSchema) ||
 			binding.Spec.Limits.MaxResultBytes == 0 ||
-			(binding.Spec.NeedsReadAccess && (binding.Prepare == nil || binding.Spec.Limits.MaxScanBytes == 0)) {
+			(binding.Spec.NeedsReadAccess && (binding.Prepare == nil || binding.Spec.Limits.MaxScanBytes == 0)) ||
+			(binding.Spec.NeedsArtifactOutput && binding.Spec.Limits.MaxRawOutputBytes == 0) {
 			return fmt.Errorf("%w: invalid tool %q", contract.ErrInvalidConfiguration, ref)
 		}
 	}
@@ -45,6 +46,9 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 	if err := ctx.Err(); err != nil {
 		return MeshReply{}, errors.Join(contract.ErrNotDelivered, err)
 	}
+	if req.Operation == BeginArtifactOutput || req.Operation == SettleArtifactOutput {
+		return l.artifactCall(ctx, req.Operation, e)
+	}
 	if req.Operation == Invoke {
 		binding, ok := l.tools[req.Tool.Tool]
 		if !ok {
@@ -52,7 +56,8 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		}
 		if req.Tool.RunID != id.run.RunID || req.Tool.CallID == "" || req.Tool.CallID != id.call.CallID ||
 			req.Tool.Tool != id.call.Tool || req.Tool.Limits != id.call.Limits ||
-			req.Tool.EnvironmentGrant != e.Grant || binding.Spec.NeedsReadAccess != (e.Grant != "") {
+			req.Tool.EnvironmentGrant != e.Grant || binding.Spec.NeedsReadAccess != (e.Grant != "") ||
+			binding.Spec.NeedsArtifactOutput != (req.Tool.Limits.MaxRawOutputBytes > 0) {
 			return MeshReply{}, errors.Join(contract.ErrNotDelivered, contract.ErrAccessDenied)
 		}
 		toolCtx := contract.WithFileOpener(ctx, func(openCtx context.Context, claimed contract.ToolRequest, path string) (io.ReadCloser, error) {
@@ -73,6 +78,9 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 			reply, err := l.Call(ctx, MeshRequest{Operation: OpenEnvironmentRead, Environment: read})
 			return reply.Reader, err
 		})
+		if binding.Spec.NeedsArtifactOutput {
+			toolCtx = l.withArtifactOutput(toolCtx, e, req.Tool)
+		}
 		result, err := binding.Tool.Invoke(toolCtx, req.Tool)
 		if err != nil {
 			// Delivery already happened. An error from the tool is not Mesh delivery evidence.
@@ -87,6 +95,10 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 	if e.Call != (contract.CallScope{}) && e.Call.Run != e.Run {
 		return MeshReply{}, errors.Join(contract.ErrNotDelivered, contract.ErrAccessDenied)
 	}
+	// The workspace grant only governs read resources; artifact output has its own scope.
+	scope := e.Call
+	scope.Limits.MaxRawOutputBytes = 0
+
 	switch req.Operation {
 	case DescribeEnvironmentRead:
 		descriptor, ok := env.(contract.EnvironmentReadDescriptor)
@@ -99,13 +111,13 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		handle, err := env.Allocate(ctx, e.Run)
 		return MeshReply{Handle: handle}, err
 	case GrantEnvironment:
-		grant, err := env.Grant(ctx, e.Call, e.Prefix)
+		grant, err := env.Grant(ctx, scope, e.Prefix)
 		return MeshReply{Grant: grant}, err
 	case OpenEnvironmentRead:
-		reader, err := env.OpenRead(ctx, e.Call, e.Grant, e.Path)
+		reader, err := env.OpenRead(ctx, scope, e.Grant, e.Path)
 		return MeshReply{Reader: reader}, err
 	case RevokeEnvironment:
-		scanned, err := env.Revoke(ctx, e.Call, e.Grant)
+		scanned, err := env.Revoke(ctx, scope, e.Grant)
 		return MeshReply{Scanned: scanned}, err
 	case ReleaseEnvironment:
 		return MeshReply{}, env.Release(ctx, e.Run, e.Handle)

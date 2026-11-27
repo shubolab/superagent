@@ -13,12 +13,13 @@ type ModelRef string
 type SubjectID string
 
 type Budget struct {
-	Timeout            *time.Duration
-	MaxModelRequests   *uint64
-	MaxModelInputBytes *uint64
-	MaxOutputBytes     *uint64
-	MaxToolRequests    *uint64
-	MaxToolScanBytes   *uint64
+	Timeout               *time.Duration
+	MaxModelRequests      *uint64
+	MaxModelInputBytes    *uint64
+	MaxOutputBytes        *uint64
+	MaxToolRequests       *uint64
+	MaxToolScanBytes      *uint64
+	MaxToolRawOutputBytes *uint64
 }
 
 type RunnerConfig struct {
@@ -172,6 +173,7 @@ const (
 	StopModelOutputLimit      StopCode = "model_output_limit"
 	StopModelRequestLimit     StopCode = "model_request_limit"
 	StopToolRequestLimit      StopCode = "tool_request_limit"
+	StopToolRawOutputLimit    StopCode = "tool_raw_output_limit"
 	StopToolScanLimit         StopCode = "tool_scan_limit"
 	StopToolReceiptLimit      StopCode = "tool_receipt_limit"
 	StopToolUnknown           StopCode = "tool_outcome_unknown"

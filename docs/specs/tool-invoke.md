@@ -85,6 +85,8 @@ type ToolUsage struct {
 
 `Content` 是有界的模型可见结果，完整大产物通过 `ArtifactRef` 返回。`Reason.Code` 供程序判断，`Reason.Message` 是可披露的简短说明。`Usage` 报告受管通道的实际字节，含按限额停止前的消耗。已确认的零用量显式为零，缺失表示不可确认或不适用。运行器按 `RunID`、`CallID` 和原工具绑定校验回执。 [大输出与结果大小](tool-call-lifecycle.md#大输出与结果大小)
 
+
+本地大产物由显式登记的 `MeshConfig.LocalArtifacts` 管理。工具声明 `NeedsArtifactOutput`，宿主授予 `AllowArtifacts` 并配置 `Budget.MaxToolRawOutputBytes`。工具通过 `OpenToolArtifact` 分块写入，调用 `Complete` 取得暂存引用。运行器确认匹配回执后发布，宿主用 `Run.ReadArtifact` 读取有界页。
 ### Go error 与回执
 
 - **`err == nil`** 表示返回了一份可验证的 `ToolResult`。业务失败、明确未执行、工具提供方报告结果不明都通过回执表达。

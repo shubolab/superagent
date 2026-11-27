@@ -33,7 +33,10 @@ const (
 	MeasureModelInput
 	InvalidateModelEstimate
 	ReadContextSource
+	ReadArtifact
 	Invoke
+	BeginArtifactOutput
+	SettleArtifactOutput
 	DescribeEnvironmentRead
 	AllocateEnvironment
 	GrantEnvironment
@@ -50,6 +53,7 @@ type MeshRequest struct {
 	Model          contract.ModelRequest
 	ProfileVersion string
 	Source         ContextSourceRequest
+	Artifact       ArtifactRead
 	Tool           contract.ToolRequest
 	Environment    EnvironmentRequest
 }
@@ -66,6 +70,8 @@ type MeshReply struct {
 	Measurement      contract.InputTokenMeasurement
 	SourcePage       contract.ContextSourcePage
 	ReadCapabilities *contract.EnvironmentReadCapabilities
+	RawOutputBytes   uint64
+	ArtifactPage     contract.ArtifactPage
 }
 
 type MeshFrame struct {
@@ -74,17 +80,24 @@ type MeshFrame struct {
 }
 
 type EnvironmentRequest struct {
-	Ref    contract.EnvironmentRef
-	Run    contract.RunScope
-	Call   contract.CallScope
-	Handle contract.EnvironmentHandle
-	Grant  contract.EnvironmentGrantRef
-	Path   string
-	Prefix string
+	Ref       contract.EnvironmentRef
+	Run       contract.RunScope
+	Call      contract.CallScope
+	Handle    contract.EnvironmentHandle
+	Grant     contract.EnvironmentGrantRef
+	Path      string
+	Prefix    string
+	Artifacts []contract.ArtifactRef
 }
 
 type ContextSourceRequest struct {
 	Ref      contract.ContextSourceRef
+	Offset   uint64
+	MaxBytes uint64
+}
+
+type ArtifactRead struct {
+	Ref      contract.ArtifactRef
 	Offset   uint64
 	MaxBytes uint64
 }

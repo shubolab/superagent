@@ -21,16 +21,18 @@ type EnvironmentRequirement struct {
 }
 
 type ToolPermission struct {
-	Environment EnvironmentRequirement
-	ReadPrefix  string
+	Environment    EnvironmentRequirement
+	ReadPrefix     string
+	AllowArtifacts bool
 }
 
 type ToolSpec struct {
-	Description        string
-	InputSchema        json.RawMessage
-	NeedsReadAccess    bool
-	NeedsContextSource bool
-	Limits             ToolLimits
+	Description         string
+	InputSchema         json.RawMessage
+	NeedsReadAccess     bool
+	NeedsContextSource  bool
+	NeedsArtifactOutput bool
+	Limits              ToolLimits
 }
 
 type LocalToolBinding struct {
@@ -58,8 +60,9 @@ type ToolMessage struct {
 }
 
 type ToolLimits struct {
-	MaxScanBytes   uint64
-	MaxResultBytes uint64
+	MaxScanBytes      uint64
+	MaxResultBytes    uint64
+	MaxRawOutputBytes uint64
 }
 
 type Tool interface {
@@ -101,16 +104,19 @@ type ToolResult struct {
 }
 
 type ToolCompletion struct {
-	Outcome ToolCompletionOutcome
-	Content string `json:",omitempty"`
+	Outcome   ToolCompletionOutcome
+	Content   string        `json:",omitempty"`
+	Artifacts []ArtifactRef `json:",omitempty"`
 }
 
 type ToolReason struct {
-	Code string
+	Code    string
+	Message string `json:",omitempty"`
 }
 
 type ToolUsage struct {
-	ScannedBytes *uint64 `json:",omitempty"`
+	ScannedBytes   *uint64 `json:",omitempty"`
+	RawOutputBytes *uint64 `json:",omitempty"`
 }
 
 type ToolStatus string

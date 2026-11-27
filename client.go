@@ -18,6 +18,7 @@ type MeshConfig struct {
 	LocalTools        map[ToolRef]LocalToolBinding
 	LocalEnvironments map[EnvironmentRef]EnvironmentProvider
 	ResolveCaller     func(context.Context) (SubjectID, error)
+	LocalArtifacts    ArtifactStore
 }
 
 type Mesh struct {
@@ -50,9 +51,12 @@ func NewMesh(cfg MeshConfig) (*Mesh, error) {
 	if err := local.SetComponents(cfg.LocalTools, cfg.LocalEnvironments); err != nil {
 		return nil, err
 	}
+	if err := local.SetArtifactStore(cfg.LocalArtifacts); err != nil {
+		return nil, err
+	}
 	for ref, config := range cfg.LocalRunners {
 		runner := runners[ref].(*run.Runner)
-		if err := runner.ConfigureTools(ref, local, config, cfg.LocalTools, cfg.LocalEnvironments); err != nil {
+		if err := runner.ConfigureTools(ref, local, config, cfg.LocalTools, cfg.LocalEnvironments, cfg.LocalArtifacts != nil); err != nil {
 			return nil, fmt.Errorf("runner %q: %w", ref, err)
 		}
 	}

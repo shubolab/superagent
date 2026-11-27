@@ -74,7 +74,7 @@ func (f meshFile) resolve(catalog MeshConfig) (MeshConfig, error) {
 		return MeshConfig{}, err
 	}
 	cfg := MeshConfig{LocalRunners: make(map[RunnerRef]RunnerConfig, len(f.Runners)),
-		LocalModels: models, LocalTools: tools, LocalEnvironments: environments, ResolveCaller: catalog.ResolveCaller}
+		LocalModels: models, LocalTools: tools, LocalEnvironments: environments, ResolveCaller: catalog.ResolveCaller, LocalArtifacts: catalog.LocalArtifacts}
 	for _, ref := range slices.Sorted(maps.Keys(f.Runners)) {
 		decl := f.Runners[ref]
 		runner, ok := catalog.LocalRunners[ref]

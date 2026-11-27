@@ -238,14 +238,26 @@ func historyID(id contract.CallID, ordinal int, used map[string]bool) string {
 }
 
 func receiptContent(receipt contract.ToolResult) (string, bool) {
-	if receipt.Completion != nil && receipt.Completion.Outcome == contract.ToolSucceeded {
-		return receipt.Completion.Content, false
-	}
-	if receipt.Reason != nil {
-		if receipt.Completion != nil && receipt.Completion.Content != "" {
-			return receipt.Reason.Code + ": " + receipt.Completion.Content, true
+	var content string
+	if receipt.Completion != nil {
+		content = receipt.Completion.Content
+		if len(receipt.Completion.Artifacts) != 0 {
+			encoded, _ := json.Marshal(receipt.Completion)
+			content = string(encoded)
 		}
-		return receipt.Reason.Code, true
+		if receipt.Completion.Outcome == contract.ToolSucceeded {
+			return content, false
+		}
 	}
-	return "tool_failed", true
+	if receipt.Reason == nil {
+		return "tool_failed", true
+	}
+	reason := receipt.Reason.Code
+	if receipt.Reason.Message != "" {
+		reason += ": " + receipt.Reason.Message
+	}
+	if content != "" {
+		return reason + ": " + content, true
+	}
+	return reason, true
 }
