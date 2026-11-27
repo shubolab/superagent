@@ -4,6 +4,9 @@ package superagent
 import "github.com/shubolab/superagent/internal/contract"
 
 type (
+	CapabilityEnforcement       = contract.CapabilityEnforcement
+	EnvironmentReadCapabilities = contract.EnvironmentReadCapabilities
+	EnvironmentReadDescriptor   = contract.EnvironmentReadDescriptor
 	ContextCompactionDiagnostic = contract.ContextCompactionDiagnostic
 	ContextCompactionPolicy     = contract.ContextCompactionPolicy
 	ContextSourceReader         = contract.ContextSourceReader
@@ -73,6 +76,10 @@ type (
 )
 
 const (
+	CapabilityEnforced                = contract.CapabilityEnforced
+	CapabilityMeasured                = contract.CapabilityMeasured
+	CapabilityUnavailable             = contract.CapabilityUnavailable
+	StopEnvironmentCapability         = contract.StopEnvironmentCapability
 	MeasurementExact                  = contract.MeasurementExact
 	MeasurementEstimated              = contract.MeasurementEstimated
 	StopContextMeasurementUnavailable = contract.StopContextMeasurementUnavailable
@@ -126,6 +133,7 @@ const (
 )
 
 var (
+	ErrEnvironmentBusy               = contract.ErrEnvironmentBusy
 	ErrContextSourceUnavailable      = contract.ErrContextSourceUnavailable
 	ErrContextMeasurementUnavailable = contract.ErrContextMeasurementUnavailable
 	ErrContextInputChanged           = contract.ErrContextInputChanged

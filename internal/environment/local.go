@@ -36,26 +36,38 @@ type allocation struct {
 }
 
 type grant struct {
-	scope  contract.CallScope
-	root   *os.Root
-	file   string
-	reader *readHandle
+	scope       contract.CallScope
+	root        *os.Root
+	file        string
+	reader      *readHandle
+	releaseSlot func()
 }
 
 type Local struct {
-	workspaces map[contract.WorkspaceRef]workspace
-	mu         sync.Mutex
-	next       uint64
-	runs       map[contract.EnvironmentHandle]*allocation
+	workspaces   map[contract.WorkspaceRef]workspace
+	admission    readAdmission
+	maxScanBytes uint64
+	mu           sync.Mutex
+	next         uint64
+	runs         map[contract.EnvironmentHandle]*allocation
 }
 
 func NewLocal(config map[contract.WorkspaceRef]WorkspaceConfig) (*Local, error) {
+	return NewLocalWithOptions(config, DefaultReadOptions())
+}
+
+func NewLocalWithOptions(config map[contract.WorkspaceRef]WorkspaceConfig, options ReadOptions) (*Local, error) {
+	if options.MaxScanBytes == 0 || options.MaxConcurrentReads <= 0 || options.MaxQueuedReads < 0 {
+		return nil, fmt.Errorf("%w: invalid local read capacity", contract.ErrInvalidConfiguration)
+	}
 	if !supportsRootedRead || len(config) == 0 {
 		return nil, fmt.Errorf("%w: local rooted read environment unavailable", contract.ErrInvalidConfiguration)
 	}
 	local := &Local{
-		workspaces: make(map[contract.WorkspaceRef]workspace, len(config)),
-		runs:       make(map[contract.EnvironmentHandle]*allocation),
+		admission:    readAdmission{active: make(chan struct{}, options.MaxConcurrentReads), waiting: make(chan struct{}, options.MaxQueuedReads)},
+		maxScanBytes: options.MaxScanBytes,
+		workspaces:   make(map[contract.WorkspaceRef]workspace, len(config)),
+		runs:         make(map[contract.EnvironmentHandle]*allocation),
 	}
 	for ref, cfg := range config {
 		if ref == "" || !filepath.IsAbs(cfg.Root) || len(cfg.ReadPrefixes) == 0 {
@@ -127,20 +139,28 @@ func RelativeFile(prefix, file string) (string, bool) {
 }
 
 func (l *Local) Grant(ctx context.Context, scope contract.CallScope, prefix string) (contract.EnvironmentGrantRef, error) {
+	ctx, cancel := context.WithDeadline(ctx, scope.Run.Deadline)
+	defer cancel()
+	l.mu.Lock()
+	_, _, _, err := l.checkGrantLocked(ctx, scope, prefix)
+	l.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	if err := l.admission.acquire(ctx); err != nil {
+		return "", err
+	}
+	granted := false
+	defer func() {
+		if !granted {
+			l.admission.release()
+		}
+	}()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	run := l.runs[scope.Handle]
-	ws := l.workspaces[scope.Run.Workspace]
-	identity, allowed := ws.prefixes[prefix]
-	file, valid := RelativeFile(prefix, scope.Path)
-	if run == nil || run.scope != scope.Run || scope.CallID == "" || scope.Tool == "" ||
-		scope.Limits.MaxScanBytes == 0 || scope.Limits.MaxResultBytes == 0 || !allowed || !valid || expired(ctx, scope.Run) {
-		return "", contract.ErrAccessDenied
-	}
-	for _, g := range run.grants {
-		if g.scope.CallID == scope.CallID {
-			return "", contract.ErrAccessDenied
-		}
+	run, file, identity, err := l.checkGrantLocked(ctx, scope, prefix)
+	if err != nil {
+		return "", err
 	}
 	root, err := run.root.OpenRoot(prefix)
 	if err != nil {
@@ -153,8 +173,29 @@ func (l *Local) Grant(ctx context.Context, scope contract.CallScope, prefix stri
 	}
 	l.next++
 	ref := contract.EnvironmentGrantRef(strconv.FormatUint(l.next, 10))
-	run.grants[ref] = &grant{scope: scope, root: root, file: file}
+	run.grants[ref] = &grant{scope: scope, root: root, file: file, releaseSlot: l.admission.release}
+	granted = true
 	return ref, nil
+}
+
+func (l *Local) checkGrantLocked(ctx context.Context, scope contract.CallScope, prefix string) (*allocation, string, fs.FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", nil, err
+	}
+	run := l.runs[scope.Handle]
+	identity, allowed := l.workspaces[scope.Run.Workspace].prefixes[prefix]
+	file, valid := RelativeFile(prefix, scope.Path)
+	if run == nil || run.scope != scope.Run || scope.CallID == "" || scope.Tool == "" ||
+		scope.Limits.MaxScanBytes == 0 || scope.Limits.MaxScanBytes > l.maxScanBytes ||
+		scope.Limits.MaxResultBytes == 0 || !allowed || !valid {
+		return nil, "", nil, contract.ErrAccessDenied
+	}
+	for _, g := range run.grants {
+		if g.scope.CallID == scope.CallID {
+			return nil, "", nil, contract.ErrAccessDenied
+		}
+	}
+	return run, file, identity, nil
 }
 
 func (l *Local) OpenRead(ctx context.Context, scope contract.CallScope, ref contract.EnvironmentGrantRef, file string) (io.ReadCloser, error) {
@@ -233,6 +274,7 @@ func expired(ctx context.Context, scope contract.RunScope) bool {
 }
 
 func (g *grant) close() (uint64, error) {
+	defer g.releaseSlot()
 	var scanned uint64
 	if g.reader != nil {
 		err := g.reader.Close()

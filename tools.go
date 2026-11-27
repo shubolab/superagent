@@ -12,6 +12,13 @@ func NewLocalReadEnvironment(workspaces map[WorkspaceRef]WorkspaceConfig) (Envir
 	return environment.NewLocal(workspaces)
 }
 
+type LocalReadEnvironmentOptions = environment.ReadOptions
+
+// NewLocalReadEnvironmentWithOptions sets shared capacity for all workspaces in the binding.
+func NewLocalReadEnvironmentWithOptions(workspaces map[WorkspaceRef]WorkspaceConfig, options LocalReadEnvironmentOptions) (EnvironmentProvider, error) {
+	return environment.NewLocalWithOptions(workspaces, options)
+}
+
 type SearchReport = search.Report
 type SearchMatch = search.Match
 

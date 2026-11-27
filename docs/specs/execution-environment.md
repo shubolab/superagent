@@ -40,6 +40,8 @@
 
 可用 Linux cgroup v2 和 Windows Job Objects 验证进程组控制能力。具体是否覆盖全部后代、是否支持磁盘额度和异常回收，仍由对应环境单独验收。 [Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory) · [Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
 
+
+内置本地读取环境通过 `DescribeRead` 公布可强制的扫描、时限、并发和等待上限。默认每次读取最多 1 MiB，同一实例同时容纳 8 个读取许可和 16 个等待。宿主可用 `NewLocalReadEnvironmentWithOptions` 修改上限。等待发生在按次授权签发前，队列满时回报 `environment_busy`。
 ## 取消与清理
 
 1. 运行器在取消生效后停止授权和派发，通过 Mesh 通知工具提供方与环境。清理使用单独的有界操作期限，即使 Run 的执行上下文已结束也能发出请求。

@@ -124,6 +124,7 @@ func (r *Runner) modelTools(refs []contract.ToolRef) []contract.ModelTool {
 type activity struct {
 	transport mesh.MeshTransport
 	env       mesh.EnvironmentRequest
+	readCap   uint64
 }
 
 func (r *Runner) newActivity(s *state, subject contract.SubjectID) *activity {
@@ -141,6 +142,19 @@ func (r *Runner) newActivity(s *state, subject contract.SubjectID) *activity {
 func (a *activity) allocate(s *state) bool {
 	if a.env.Ref == "" {
 		return true
+	}
+	described, err := mesh.CallComponent(s.ctx, a.transport, mesh.DescribeEnvironmentRead, a.env, contract.ToolRequest{})
+	if err != nil {
+		s.failModel(contract.Failed, contract.StopEnvironmentFailure, 0)
+		return false
+	}
+	if caps := described.ReadCapabilities; caps != nil {
+		if caps.Scan != contract.CapabilityEnforced || caps.Deadline != contract.CapabilityEnforced ||
+			caps.MaxScanBytes == 0 || caps.MaxConcurrentReads <= 0 || caps.MaxQueuedReads < 0 {
+			s.failModel(contract.Failed, contract.StopEnvironmentCapability, 0)
+			return false
+		}
+		a.readCap = caps.MaxScanBytes
 	}
 	reply, err := mesh.CallComponent(s.ctx, a.transport, mesh.AllocateEnvironment, a.env, contract.ToolRequest{})
 	if err != nil || reply.Handle == "" {
@@ -206,6 +220,9 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	}
 	if allowed {
 		req.Limits.MaxScanBytes = min(balance.scan, binding.Spec.Limits.MaxScanBytes)
+		if binding.Spec.NeedsReadAccess && a.readCap > 0 {
+			req.Limits.MaxScanBytes = min(req.Limits.MaxScanBytes, a.readCap)
+		}
 		req.Limits.MaxResultBytes = min(balance.output, binding.Spec.Limits.MaxResultBytes)
 	}
 	if req.Limits.MaxResultBytes < minimumReceiptSize(req) {
@@ -239,6 +256,9 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 		}
 		e.Prefix = permission.ReadPrefix
 		grant, err := mesh.CallComponent(s.ctx, a.transport, mesh.GrantEnvironment, e, contract.ToolRequest{})
+		if errors.Is(err, contract.ErrEnvironmentBusy) {
+			return reject("environment_busy")
+		}
 		if err != nil || grant.Grant == "" {
 			return reject("grant_denied")
 		}
@@ -340,11 +360,14 @@ func (s *state) settleTool(balance *limits, req contract.ToolRequest, result con
 		measured = req.Limits.MaxScanBytes
 	}
 	balance.scan -= measured
+	var code string
 	if !validToolResult(result, req.RunID, req.CallID) {
 		status = contract.ToolStatusUnknown
+	} else if result.Reason != nil {
+		code = result.Reason.Code
 	}
 	s.events.publish(contract.Event{Kind: contract.EventToolCompleted, Step: s.step,
-		Tool: &contract.ToolEvent{CallID: req.CallID, Tool: req.Tool, Status: status}})
+		Tool: &contract.ToolEvent{CallID: req.CallID, Tool: req.Tool, Status: status, Code: code}})
 	if status == contract.ToolStatusUnknown {
 		s.finishLocked(contract.ToolOutcomeUnknown, nil, s.usage, &contract.StopDetail{
 			Code: contract.StopToolUnknown, Step: s.step, CallID: req.CallID,

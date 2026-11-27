@@ -127,6 +127,7 @@ type ToolEvent struct {
 	CallID CallID
 	Tool   ToolRef
 	Status ToolStatus `json:",omitempty"`
+	Code   string     `json:",omitempty"`
 }
 
 type CleanupStatus string
@@ -161,9 +162,31 @@ type EnvironmentProvider interface {
 	Release(context.Context, RunScope, EnvironmentHandle) error
 }
 
+type CapabilityEnforcement string
+
+const (
+	CapabilityEnforced    CapabilityEnforcement = "enforced"
+	CapabilityMeasured    CapabilityEnforcement = "measured"
+	CapabilityUnavailable CapabilityEnforcement = "unavailable"
+)
+
+type EnvironmentReadCapabilities struct {
+	Scan               CapabilityEnforcement
+	Deadline           CapabilityEnforcement
+	MaxScanBytes       uint64
+	MaxConcurrentReads int
+	MaxQueuedReads     int
+}
+
+// EnvironmentReadDescriptor optionally declares binding-specific limits for local reads.
+type EnvironmentReadDescriptor interface {
+	DescribeRead(context.Context, WorkspaceRef) (EnvironmentReadCapabilities, error)
+}
+
 var (
-	ErrReadLimit    = errors.New("file read limit reached")
-	ErrNotDelivered = errors.New("tool request not delivered")
+	ErrEnvironmentBusy = errors.New("environment_busy")
+	ErrReadLimit       = errors.New("file read limit reached")
+	ErrNotDelivered    = errors.New("tool request not delivered")
 )
 
 type fileOpenerKey struct{}

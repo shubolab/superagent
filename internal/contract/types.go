@@ -161,21 +161,22 @@ const (
 type StopCode string
 
 const (
-	StopCancelled          StopCode = "run_cancelled"
-	StopDeadline           StopCode = "run_deadline"
-	StopModelAuthFailed    StopCode = "model_auth_failed"
-	StopModelNotFound      StopCode = "model_not_found"
-	StopModelFailure       StopCode = "model_request_failed"
-	StopModelTruncated     StopCode = "model_truncated"
-	StopModelProtocol      StopCode = "model_protocol_error"
-	StopModelInputLimit    StopCode = "model_input_limit"
-	StopModelOutputLimit   StopCode = "model_output_limit"
-	StopModelRequestLimit  StopCode = "model_request_limit"
-	StopToolRequestLimit   StopCode = "tool_request_limit"
-	StopToolScanLimit      StopCode = "tool_scan_limit"
-	StopToolReceiptLimit   StopCode = "tool_receipt_limit"
-	StopToolUnknown        StopCode = "tool_outcome_unknown"
-	StopEnvironmentFailure StopCode = "environment_failed"
+	StopCancelled             StopCode = "run_cancelled"
+	StopDeadline              StopCode = "run_deadline"
+	StopModelAuthFailed       StopCode = "model_auth_failed"
+	StopModelNotFound         StopCode = "model_not_found"
+	StopModelFailure          StopCode = "model_request_failed"
+	StopModelTruncated        StopCode = "model_truncated"
+	StopModelProtocol         StopCode = "model_protocol_error"
+	StopModelInputLimit       StopCode = "model_input_limit"
+	StopModelOutputLimit      StopCode = "model_output_limit"
+	StopModelRequestLimit     StopCode = "model_request_limit"
+	StopToolRequestLimit      StopCode = "tool_request_limit"
+	StopToolScanLimit         StopCode = "tool_scan_limit"
+	StopToolReceiptLimit      StopCode = "tool_receipt_limit"
+	StopToolUnknown           StopCode = "tool_outcome_unknown"
+	StopEnvironmentCapability StopCode = "environment_capability_unavailable"
+	StopEnvironmentFailure    StopCode = "environment_failed"
 )
 
 const (

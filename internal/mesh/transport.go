@@ -34,6 +34,7 @@ const (
 	InvalidateModelEstimate
 	ReadContextSource
 	Invoke
+	DescribeEnvironmentRead
 	AllocateEnvironment
 	GrantEnvironment
 	OpenEnvironmentRead
@@ -54,16 +55,17 @@ type MeshRequest struct {
 }
 
 type MeshReply struct {
-	RunID       contract.RunID
-	Result      contract.Result
-	Tool        contract.ToolResult
-	Handle      contract.EnvironmentHandle
-	Grant       contract.EnvironmentGrantRef
-	Reader      io.ReadCloser
-	Scanned     uint64
-	ModelLimits contract.ModelContextLimits
-	Measurement contract.InputTokenMeasurement
-	SourcePage  contract.ContextSourcePage
+	RunID            contract.RunID
+	Result           contract.Result
+	Tool             contract.ToolResult
+	Handle           contract.EnvironmentHandle
+	Grant            contract.EnvironmentGrantRef
+	Reader           io.ReadCloser
+	Scanned          uint64
+	ModelLimits      contract.ModelContextLimits
+	Measurement      contract.InputTokenMeasurement
+	SourcePage       contract.ContextSourcePage
+	ReadCapabilities *contract.EnvironmentReadCapabilities
 }
 
 type MeshFrame struct {

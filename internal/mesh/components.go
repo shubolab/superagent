@@ -88,6 +88,13 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		return MeshReply{}, errors.Join(contract.ErrNotDelivered, contract.ErrAccessDenied)
 	}
 	switch req.Operation {
+	case DescribeEnvironmentRead:
+		descriptor, ok := env.(contract.EnvironmentReadDescriptor)
+		if !ok {
+			return MeshReply{}, nil
+		}
+		capabilities, err := descriptor.DescribeRead(ctx, e.Run.Workspace)
+		return MeshReply{ReadCapabilities: &capabilities}, err
 	case AllocateEnvironment:
 		handle, err := env.Allocate(ctx, e.Run)
 		return MeshReply{Handle: handle}, err
