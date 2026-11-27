@@ -54,6 +54,11 @@ type ModelAdapterClient interface {
 	Close(ctx context.Context) error
 }
 
+// ModelAdapterInputMeters is an optional capability of a factory client.
+type ModelAdapterInputMeters interface {
+	InputMeter(modelID string) ModelInputMeter
+}
+
 type ModelSetupCode string
 
 const (
@@ -111,7 +116,13 @@ func NewModelBindings(ctx context.Context, cfg ModelFactoryConfig, secrets Crede
 		clients[ref] = client
 	}
 	for ref, config := range cfg.Models {
-		b.models[ref] = boundModel{client: clients[config.Provider], modelID: config.ModelID}
+		base := boundModel{client: clients[config.Provider], modelID: config.ModelID}
+		b.models[ref] = base
+		if provider, ok := base.client.(ModelAdapterInputMeters); ok {
+			if meter := provider.InputMeter(config.ModelID); !nilModelComponent(meter) {
+				b.models[ref] = meteredBoundModel{boundModel: base, ModelInputMeter: meter}
+			}
+		}
 	}
 	return b, nil
 }
@@ -237,4 +248,9 @@ type boundModel struct {
 
 func (m boundModel) Generate(ctx context.Context, req ModelRequest) (ModelStream, error) {
 	return m.client.Generate(ctx, m.modelID, req)
+}
+
+type meteredBoundModel struct {
+	boundModel
+	ModelInputMeter
 }

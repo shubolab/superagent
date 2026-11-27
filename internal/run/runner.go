@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"sync"
@@ -35,6 +36,7 @@ type Runner struct {
 	tools              map[contract.ToolRef]contract.LocalToolBinding
 	permissions        map[contract.SubjectID]map[contract.ToolRef]contract.ToolPermission
 	defaultEnvironment contract.EnvironmentRef
+	contextPolicies    map[contract.ModelRef]contract.ModelContextPolicy
 
 	mu   sync.Mutex
 	runs map[runKey]*state
@@ -63,8 +65,14 @@ func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open 
 			allowed[subject][ref] = struct{}{}
 		}
 	}
+	for ref, policy := range cfg.ContextPolicies {
+		if _, ok := models[ref]; !ok || policy.MaxOutputTokens == 0 {
+			return nil, fmt.Errorf("%w: invalid context policy for model %q", contract.ErrInvalidConfiguration, ref)
+		}
+	}
+
 	return &Runner{
-		models: models, allowed: allowed, defaults: defaults, caps: caps, open: open,
+		models: models, allowed: allowed, defaults: defaults, caps: caps, open: open, contextPolicies: maps.Clone(cfg.ContextPolicies),
 		observeBufferBytes: cfg.ObserveBufferBytes, retention: cfg.ResultRetention, runs: make(map[runKey]*state),
 	}, nil
 }

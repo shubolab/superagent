@@ -82,5 +82,9 @@ func inputSize(req contract.ModelRequest, limit uint64) (uint64, bool) {
 		encoded, _ := json.Marshal(req.Tools)
 		size += uint64(len(`,"Tools":`) + len(encoded))
 	}
+	if req.Context != nil && len(req.Context.Summary) > 0 && size <= limit {
+		encoded, _ := json.Marshal(req.Context.Summary)
+		size += uint64(len(`,"Summary":`) + len(encoded))
+	}
 	return size, size <= limit
 }

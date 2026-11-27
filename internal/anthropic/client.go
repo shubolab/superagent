@@ -53,6 +53,9 @@ func New(endpoint, key string, maxOutputTokens uint64) (*Client, error) {
 }
 
 func (c *Client) Generate(ctx context.Context, modelID string, req contract.ModelRequest) (contract.ModelStream, error) {
+	if req.Context != nil {
+		return nil, contract.ErrContextMeasurementUnavailable
+	}
 	if req.MaxOutputBytes == 0 {
 		return nil, contract.ErrModelOutputLimit
 	}

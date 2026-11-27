@@ -23,6 +23,7 @@ type Budget struct {
 
 type RunnerConfig struct {
 	AllowedModels      map[SubjectID][]ModelRef
+	ContextPolicies    map[ModelRef]ModelContextPolicy
 	AllowedTools       map[SubjectID]map[ToolRef]ToolPermission
 	DefaultBudget      Budget
 	Tools              []ToolRef
@@ -71,6 +72,7 @@ type ModelRequest struct {
 	Messages       []Message
 	Tools          []ModelTool
 	MaxOutputBytes uint64
+	Context        *ModelContextOptions `json:",omitempty"`
 }
 
 // ModelStream has one reader. Close is idempotent and unblocks Recv.
@@ -175,11 +177,19 @@ const (
 	StopEnvironmentFailure StopCode = "environment_failed"
 )
 
+const (
+	StopContextMeasurementUnavailable StopCode = "context_measurement_unavailable"
+	StopContextInputChanged           StopCode = "context_input_changed"
+	StopModelContextOverflow          StopCode = "model_context_overflow"
+	StopContextWindowLimit            StopCode = "context_window_limit"
+)
+
 type StopDetail struct {
-	Code       StopCode
-	Step       uint32
-	LimitBytes uint64
-	CallID     CallID
+	Code        StopCode
+	Step        uint32
+	LimitBytes  uint64
+	LimitTokens uint64
+	CallID      CallID
 }
 
 type Result struct {

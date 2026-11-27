@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"sync"
 
 	"github.com/shubolab/superagent/internal/contract"
 )
@@ -17,11 +18,12 @@ type RunnerEndpoint interface {
 }
 
 type Local struct {
-	runners       map[contract.RunnerRef]RunnerEndpoint
-	models        map[contract.ModelRef]contract.ModelProvider
-	resolveCaller func(context.Context) (contract.SubjectID, error)
-	tools         map[contract.ToolRef]contract.LocalToolBinding
-	environments  map[contract.EnvironmentRef]contract.EnvironmentProvider
+	invalidEstimates sync.Map
+	runners          map[contract.RunnerRef]RunnerEndpoint
+	models           map[contract.ModelRef]contract.ModelProvider
+	resolveCaller    func(context.Context) (contract.SubjectID, error)
+	tools            map[contract.ToolRef]contract.LocalToolBinding
+	environments     map[contract.EnvironmentRef]contract.EnvironmentProvider
 }
 
 func NewLocal(
@@ -51,6 +53,9 @@ func (l *Local) HasRunner(ref contract.RunnerRef) bool {
 }
 
 func (l *Local) Call(ctx context.Context, req MeshRequest) (MeshReply, error) {
+	if req.Operation == MeasureModelInput || req.Operation == InvalidateModelEstimate {
+		return l.modelInputCall(ctx, req)
+	}
 	if req.Operation >= Invoke {
 		return l.componentCall(ctx, req)
 	}
@@ -97,6 +102,9 @@ func (l *Local) OpenStream(ctx context.Context, req MeshRequest) (MeshStream, er
 		provider, ok := l.models[req.Model.Model]
 		if !ok {
 			return nil, contract.ErrBindingNotFound
+		}
+		if opts := req.Model.Context; opts != nil && l.estimateInvalid(req.Model.Model, opts.ProfileVersion) {
+			return nil, contract.ErrContextMeasurementUnavailable
 		}
 		stream, err := provider.Generate(ctx, req.Model)
 		if err != nil {

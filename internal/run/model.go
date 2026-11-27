@@ -57,6 +57,21 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 			s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
 			return
 		}
+		policy, metered := r.contextPolicies[req.Model]
+		var measured modelInput
+		if metered {
+			req.Context = &contract.ModelContextOptions{MaxOutputTokens: policy.MaxOutputTokens}
+			var err error
+			measured, err = r.measureInput(s, subject, &req, policy)
+			if err != nil {
+				s.failModel(contract.Failed, contract.StopContextMeasurementUnavailable, 0)
+				return
+			}
+			if measured.measurement.Tokens > measured.limit {
+				s.failWindow(measured.limit)
+				return
+			}
+		}
 		balance.modelRequests--
 		balance.modelInput -= input
 		reply, output := r.modelReply(s, subject, req, committedIDs)
@@ -64,6 +79,9 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 			return
 		}
 		balance.output -= output
+		if metered {
+			r.recordEstimate(subject, req.Model, measured.measurement, reply.Usage, policy.SafetyMarginTokens)
+		}
 		s.mu.Lock()
 		if !s.runningLocked() {
 			s.mu.Unlock()
@@ -152,6 +170,12 @@ func (r *Runner) modelReply(s *state, subject contract.SubjectID, req contract.M
 func (s *state) failAdapter(err error) {
 	var code contract.StopCode
 	switch {
+	case errors.Is(err, contract.ErrContextMeasurementUnavailable):
+		code = contract.StopContextMeasurementUnavailable
+	case errors.Is(err, contract.ErrContextInputChanged):
+		code = contract.StopContextInputChanged
+	case errors.Is(err, contract.ErrModelContextOverflow):
+		code = contract.StopModelContextOverflow
 	case errors.Is(err, contract.ErrModelAuthFailed):
 		code = contract.StopModelAuthFailed
 	case errors.Is(err, contract.ErrModelNotFound):

@@ -30,6 +30,8 @@ const (
 	Cancel
 	Observe
 	Generate
+	MeasureModelInput
+	InvalidateModelEstimate
 	Invoke
 	AllocateEnvironment
 	GrantEnvironment
@@ -39,23 +41,26 @@ const (
 )
 
 type MeshRequest struct {
-	Operation   Operation
-	Runner      contract.RunnerRef
-	RunID       contract.RunID
-	Start       contract.StartRequest
-	Model       contract.ModelRequest
-	Tool        contract.ToolRequest
-	Environment EnvironmentRequest
+	Operation      Operation
+	Runner         contract.RunnerRef
+	RunID          contract.RunID
+	Start          contract.StartRequest
+	Model          contract.ModelRequest
+	ProfileVersion string
+	Tool           contract.ToolRequest
+	Environment    EnvironmentRequest
 }
 
 type MeshReply struct {
-	RunID   contract.RunID
-	Result  contract.Result
-	Tool    contract.ToolResult
-	Handle  contract.EnvironmentHandle
-	Grant   contract.EnvironmentGrantRef
-	Reader  io.ReadCloser
-	Scanned uint64
+	RunID       contract.RunID
+	Result      contract.Result
+	Tool        contract.ToolResult
+	Handle      contract.EnvironmentHandle
+	Grant       contract.EnvironmentGrantRef
+	Reader      io.ReadCloser
+	Scanned     uint64
+	ModelLimits contract.ModelContextLimits
+	Measurement contract.InputTokenMeasurement
 }
 
 type MeshFrame struct {

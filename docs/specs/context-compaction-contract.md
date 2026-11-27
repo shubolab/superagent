@@ -26,10 +26,11 @@ type ModelContextOptions struct {
     Summary             []ContextSummaryEntry
     MaxOutputTokens     uint64
     ExpectedInputDigest string
+    ProfileVersion      string
 }
 ```
 
-启用时，模型绑定提供可选的 `ModelInputMeter`，`ModelRequest` 携带可选的 `Context *ModelContextOptions`。计量和派发均经 Mesh，合规请求继续使用 `ModelProvider.Generate`。`WindowTokens` 须为正数，`MaxInputTokens=0` 表示沿用总窗口约束。`MaxOutputTokens` 按当前模型映射为实际输出上限，预留涵盖供应商计入窗口的全部输出。
+宿主通过 `RunnerConfig.ContextPolicies` 为特定模型启用计量，并提供输出保留、安全余量及允许的已校准估算版本。模型绑定提供可选的 `ModelInputMeter`，`ModelRequest` 携带可选的 `Context *ModelContextOptions`。计量和派发均经 Mesh，合规请求继续使用 `ModelProvider.Generate`。`WindowTokens` 须为正数，`MaxInputTokens=0` 表示沿用总窗口约束。`MaxOutputTokens` 按当前模型映射为实际输出上限，预留涵盖供应商计入窗口的全部输出。
 
 | 数据 | 口径 |
 | --- | --- |
@@ -37,7 +38,7 @@ type ModelContextOptions struct {
 | `Kind` 与 `ProfileVersion` | `exact` 表示适配器掌握该版本的编码与分词。否则用 `estimated`，按同一模型和编码版本的实测输入验证低估量，配置安全余量 `S`。计量在本地执行；版本失效或缺少可靠计量时返回明确错误 |
 | 实际发送及结算 | 运行器将指纹写入 `ExpectedInputDigest`。适配器发送前核对，变化时返回 `context_input_changed`，供应商调用次数为零。供应商报告的输入 token 单独记录，缓存命中部分在总输入中只算一次，缺失时记为未知。摘要计入规范请求字节，Run 额度沿用字节和请求次数结算 |
 
-估算模式用冻结的同模型请求样本校准安全余量。线上观察到低估超过 `S` 时，该计量版本须重新验证后方可用于准入。
+估算模式用冻结的同模型请求样本校准安全余量。低估超过 `S` 时，同一 Mesh 中该模型的计量版本立即失效，重新验证后通过新装配启用。
 
 [模型请求契约](model-adapter.md#请求) · [Run 预算计量](run-budget.md#预算与扣减)
 
