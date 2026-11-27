@@ -34,6 +34,7 @@ type Runner struct {
 	devices            mesh.MeshTransport
 	tools              map[contract.ToolRef]contract.LocalToolBinding
 	permissions        map[contract.SubjectID]map[contract.ToolRef]contract.ToolPermission
+	defaultEnvironment contract.EnvironmentRef
 
 	mu   sync.Mutex
 	runs map[runKey]*state
@@ -82,12 +83,15 @@ func (r *Runner) Start(ctx context.Context, subject contract.SubjectID, req cont
 	if !ok {
 		return "", contract.ErrInvalidRequest
 	}
+	req.Environment = copyValue(req.Environment)
+	if req.Environment != nil && req.Environment.Ref == "" {
+		req.Environment.Ref = r.defaultEnvironment
+	}
 	if err := r.admitTools(subject, req); err != nil {
 		return "", err
 	}
 	req.History = cloneMessages(req.History)
 	req.Tools = slices.Clone(req.Tools)
-	req.Environment = copyValue(req.Environment)
 	req.Budget = cloneBudget(req.Budget)
 	key := runKey{subject: subject, id: req.ID}
 

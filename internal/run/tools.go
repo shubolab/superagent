@@ -23,6 +23,12 @@ const (
 func (r *Runner) ConfigureTools(ref contract.RunnerRef, transport mesh.MeshTransport, cfg contract.RunnerConfig,
 	tools map[contract.ToolRef]contract.LocalToolBinding, environments map[contract.EnvironmentRef]contract.EnvironmentProvider) error {
 	r.ref, r.devices = ref, transport
+	if cfg.DefaultEnvironment != "" {
+		if _, ok := environments[cfg.DefaultEnvironment]; !ok {
+			return fmt.Errorf("%w: unknown default environment %q", contract.ErrInvalidConfiguration, cfg.DefaultEnvironment)
+		}
+		r.defaultEnvironment = cfg.DefaultEnvironment
+	}
 	r.tools = make(map[contract.ToolRef]contract.LocalToolBinding, len(tools))
 	for ref, binding := range tools {
 		binding.Spec.InputSchema = bytes.Clone(binding.Spec.InputSchema)

@@ -28,6 +28,7 @@ type RunnerConfig struct {
 	Tools              []ToolRef
 	Environment        *EnvironmentRequirement
 	BudgetCaps         Budget
+	DefaultEnvironment EnvironmentRef
 	ObserveBufferBytes uint64
 	ResultRetention    time.Duration
 }
