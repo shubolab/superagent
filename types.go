@@ -4,6 +4,9 @@ package superagent
 import "github.com/shubolab/superagent/internal/contract"
 
 type (
+	TakeoverWorkspace           = contract.TakeoverWorkspace
+	TakeoverArtifactStore       = contract.TakeoverArtifactStore
+	TakeoverConfig              = contract.TakeoverConfig
 	RecoveryConfig              = contract.RecoveryConfig
 	RecoveryWorkspace           = contract.RecoveryWorkspace
 	RetainedArtifactStore       = contract.RetainedArtifactStore
@@ -150,6 +153,7 @@ const (
 )
 
 var (
+	ErrRecoveryOwnershipLost         = contract.ErrRecoveryOwnershipLost
 	ErrRecoveryUnavailable           = contract.ErrRecoveryUnavailable
 	ErrRecoveryBusy                  = contract.ErrRecoveryBusy
 	ErrRecoveryStorage               = contract.ErrRecoveryStorage

@@ -19,6 +19,10 @@ func openNonblocking(root *os.Root, name string) (*os.File, error) {
 
 // RecoveryWorkspace identifies the same retained directory across process restarts.
 func (l *Local) RecoveryWorkspace(ctx context.Context, scope contract.RunScope) (string, error) {
+	return takeoverWorkspaceVersion(l, ctx, scope)
+}
+
+func takeoverWorkspaceVersion(l *Local, ctx context.Context, scope contract.RunScope) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -35,4 +39,8 @@ func (l *Local) RecoveryWorkspace(ctx context.Context, scope contract.RunScope) 
 		return "", contract.ErrRecoveryUnavailable
 	}
 	return fmt.Sprintf("%d:%d", stat.Dev, stat.Ino), nil
+}
+
+func openTakeoverAppend(root *os.Root, name string) (*os.File, error) {
+	return root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0600)
 }

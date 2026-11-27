@@ -32,6 +32,7 @@ type recoveryFixture struct {
 	unexecutedReceipt      bool
 	twoTools               bool
 	artifact               bool
+	takeover               *takeoverFixture
 	mu                     sync.Mutex
 }
 
@@ -91,6 +92,16 @@ func (f *recoveryFixture) MeasureInput(_ context.Context, req ModelRequest) (Inp
 		f.stopAt("initial")
 	} else {
 		f.stopAt("batch-committed")
+		if f.takeover != nil && f.takeover.role == "old" && f.takeover.scenario == "batch-committed" {
+			if err := writeTakeoverMarker(f.root, "old-at-barrier", "batch durable"); err != nil {
+				return InputTokenMeasurement{}, err
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			if err := waitTakeoverMarker(ctx, f.root, "release-old"); err != nil {
+				return InputTokenMeasurement{}, err
+			}
+		}
 	}
 	return InputTokenMeasurement{Tokens: 32, Kind: MeasurementExact, ProfileVersion: "fixture", InputDigest: "input"}, nil
 }
@@ -101,6 +112,9 @@ func (f *recoveryFixture) invoke(ctx context.Context, req ToolRequest) (ToolResu
 		return ToolResult{}, errors.New("missing receipt identity")
 	}
 	f.append("invoked", key)
+	if f.takeover != nil {
+		return f.takeover.invoke(ctx, req, key)
+	}
 	if f.unexecutedReceipt {
 		return ToolResult{RunID: req.RunID, CallID: req.CallID, State: ToolExecutionNotExecuted, Reason: &ToolReason{Code: "already_fenced"}}, nil
 	}
@@ -133,6 +147,12 @@ type recoveryTransport struct {
 
 func (m recoveryTransport) Call(ctx context.Context, req mesh.MeshRequest) (mesh.MeshReply, error) {
 	f := m.fixture
+	if f.takeover != nil {
+		f.takeover.captureCall(m.MeshTransport, ctx, req)
+		if err := f.takeover.beforeCall(ctx, req); err != nil {
+			return mesh.MeshReply{}, err
+		}
+	}
 	switch req.Operation {
 	case mesh.Invoke:
 		f.stopAt("before-delivery")
@@ -146,7 +166,11 @@ func (m recoveryTransport) Call(ctx context.Context, req mesh.MeshRequest) (mesh
 		f.stopAt("reconciling")
 		reply, err := m.MeshTransport.Call(ctx, req)
 		if f.mismatchedReceipt && reply.Receipt != nil {
-			reply.Receipt.Key.Fingerprint = "different-request"
+			if f.takeover != nil {
+				reply.Receipt.Key.AdmissionEpoch++
+			} else {
+				reply.Receipt.Key.Fingerprint = "different-request"
+			}
 		}
 		return reply, err
 	case mesh.GrantEnvironment:
@@ -161,6 +185,13 @@ func (m recoveryTransport) Call(ctx context.Context, req mesh.MeshRequest) (mesh
 		}
 	}
 	return m.MeshTransport.Call(ctx, req)
+}
+
+func (m recoveryTransport) OpenStream(ctx context.Context, req mesh.MeshRequest) (mesh.MeshStream, error) {
+	if m.fixture.takeover != nil {
+		m.fixture.takeover.captureModel(m.MeshTransport, ctx, req)
+	}
+	return m.MeshTransport.OpenStream(ctx, req)
 }
 
 func fixtureClient(t *testing.T, fixture *recoveryFixture) (*Client, StartRequest) {
@@ -186,9 +217,18 @@ func fixtureClient(t *testing.T, fixture *recoveryFixture) (*Client, StartReques
 		ContextPolicies: map[ModelRef]ModelContextPolicy{"model": {MaxOutputTokens: 20}},
 		Recovery:        &RecoveryConfig{Directory: filepath.Join(fixture.root, "runs"), BindingVersion: fixture.version, ReconcileTimeout: fixture.workspaceWait},
 	}
-	provider, err := NewLocalReadEnvironment(map[WorkspaceRef]WorkspaceConfig{"project": {
+	workspace := map[WorkspaceRef]WorkspaceConfig{"project": {
 		Root: filepath.Join(fixture.root, "workspace"), ReadPrefixes: []string{".", "other"},
-	}})
+	}}
+	var provider EnvironmentProvider
+	var err error
+	if fixture.takeover != nil {
+		cfg.Recovery.Takeover = &TakeoverConfig{LeaseDuration: takeoverLeaseDuration}
+		cfg.AllowedTools["owner"]["write"] = ToolPermission{Environment: environmentRef, ReadPrefix: fixture.prefix, AllowArtifacts: fixture.artifact, AllowWorkspaceWrite: true}
+		provider, err = NewLocalTakeoverEnvironment(workspace)
+	} else {
+		provider, err = NewLocalReadEnvironment(workspace)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,17 +237,20 @@ func fixtureClient(t *testing.T, fixture *recoveryFixture) (*Client, StartReques
 		t.Fatal(err)
 	}
 	tools := map[ToolRef]LocalToolBinding{"write": {
-		Tool: tool, Spec: ToolSpec{InputSchema: json.RawMessage(`{"type":"object"}`), NeedsReadAccess: true, NeedsArtifactOutput: fixture.artifact,
+		Tool: tool, Spec: ToolSpec{InputSchema: json.RawMessage(`{"type":"object"}`), NeedsReadAccess: true, NeedsWorkspaceWrite: fixture.takeover != nil, NeedsArtifactOutput: fixture.artifact,
 			Limits: ToolLimits{MaxResultBytes: 1024, MaxScanBytes: 8, MaxRawOutputBytes: 8192}},
 		Prepare: func(json.RawMessage) (string, error) { return "notes.txt", nil },
 	}}
 	environments := map[EnvironmentRef]EnvironmentProvider{"files": provider}
 	var local *mesh.Local
 	runner, err := run.New(cfg, map[ModelRef]struct{}{"model": {}}, func(ctx context.Context, subject SubjectID, req ModelRequest) (ModelStream, error) {
-		return mesh.OpenModel(ctx, local, subject, req)
+		return mesh.OpenModel(ctx, recoveryTransport{local, fixture}, subject, req)
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if fixture.takeover != nil {
+		runner.SetTakeoverClock(fixture.takeover.readClock)
 	}
 	local, err = mesh.NewLocal(map[RunnerRef]mesh.RunnerEndpoint{"runner": runner}, map[ModelRef]ModelProvider{"model": fixture},
 		func(context.Context) (SubjectID, error) { return fixture.subject, nil })
@@ -222,6 +265,9 @@ func fixtureClient(t *testing.T, fixture *recoveryFixture) (*Client, StartReques
 			t.Fatal(err)
 		}
 		runner.SetRetainedArtifacts(true)
+		if fixture.takeover != nil {
+			runner.SetTakeoverArtifacts(true)
+		}
 	}
 	if err := runner.ConfigureTools("runner", recoveryTransport{local, fixture}, cfg, tools, environments, fixture.artifact); err != nil {
 		t.Fatal(err)
@@ -231,7 +277,7 @@ func fixtureClient(t *testing.T, fixture *recoveryFixture) (*Client, StartReques
 		t.Fatal(err)
 	}
 	return client, StartRequest{ID: recoveryID, Model: "model", Tools: []ToolRef{"write"}, Environment: &environmentRef,
-		Recoverable: true, Input: UserMessage{Text: "save once"}}
+		Recoverable: true, Takeover: fixture.takeover != nil, Input: UserMessage{Text: "save once"}}
 }
 
 func makeRecoveryRoot(t *testing.T) string {
@@ -359,9 +405,13 @@ func readRecoveryLog[T any](t *testing.T, root, name string) []T {
 
 type fixtureCheckpoint struct {
 	Deadline, ReconcileUntil time.Time
-	Step                     uint32
-	Balance                  struct{ ModelRequests, ToolRequests, Output, Scan uint64 }
-	Intent                   *struct {
+	Owner                    *struct {
+		Epoch, Revision uint64
+		Instance        string
+	}
+	Step    uint32
+	Balance struct{ ModelRequests, ToolRequests, Output, Scan uint64 }
+	Intent  *struct {
 		Key    ReceiptKey
 		Limits ToolLimits
 	}

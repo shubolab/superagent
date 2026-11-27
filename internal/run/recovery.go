@@ -21,9 +21,10 @@ type runIdentity struct {
 }
 
 type toolIntent struct {
-	Key    contract.ReceiptKey
-	Limits contract.ToolLimits
-	Path   string
+	Key      contract.ReceiptKey
+	Limits   contract.ToolLimits
+	Path     string
+	Admitted bool `json:",omitempty"`
 }
 
 type checkpoint struct {
@@ -40,6 +41,8 @@ type checkpoint struct {
 	Budget, Balance  limits
 	Step             uint32
 	ModelInFlight    bool
+	ModelAdmitted    bool       `json:",omitempty"`
+	Owner            *ownership `json:",omitempty"`
 	Pending          *contract.AssistantMessage
 	ToolResults      []contract.ToolResult
 	Intent           *toolIntent
@@ -56,6 +59,7 @@ type runCheckpoint struct {
 	path    string
 	lock    *os.File
 	resumed bool
+	lease   *lease
 }
 
 func (r *Runner) recoveryPath(subject contract.SubjectID, id contract.RunID) (string, runIdentity) {
@@ -75,7 +79,7 @@ func readCheckpoint(path string, id runIdentity) (checkpoint, error) {
 	if c.Format != 1 || c.Identity != id || c.Request.ID != id.ID || !c.Request.Recoverable ||
 		c.Deadline.IsZero() || c.BindingVersion == "" || c.ReconcileTimeout <= 0 ||
 		!validHistory(c.Messages) || len(c.Messages) == 0 || c.Messages[0].User == nil || *c.Messages[0].User != c.Request.Input ||
-		!c.validBalance() ||
+		!c.validBalance() || !c.validOwner() ||
 		(c.Step == 0 && c.Result == nil) || (c.Result == nil) != c.FinishedAt.IsZero() ||
 		(c.Result != nil && (c.Result.RunID != id.ID || c.Result.Outcome == "")) ||
 		(c.Stop == nil) != (c.StopOutcome == "") || !c.validPosition() {
@@ -86,6 +90,14 @@ func readCheckpoint(path string, id runIdentity) (checkpoint, error) {
 		return c, contract.ErrRecoveryStorage
 	}
 	return c, nil
+}
+
+func (c checkpoint) validOwner() bool {
+	if !c.Request.Takeover {
+		return c.Owner == nil
+	}
+	return c.Owner != nil && c.Owner.Instance != "" && c.Owner.Epoch > 0 && c.Owner.Revision > 0 &&
+		c.Owner.Duration > 0 && !c.Owner.Expires.IsZero()
 }
 
 func (c checkpoint) validBalance() bool {
@@ -123,6 +135,7 @@ func (c checkpoint) validPosition() bool {
 		key.BindingVersion == c.BindingVersion && key.WorkspaceVersion == c.WorkspaceVersion &&
 		key.Environment == environment.Ref && key.Workspace == environment.Workspace &&
 		key.Fingerprint == toolFingerprint(request, c.Intent.Path) &&
+		((c.Owner == nil && key.AdmissionEpoch == 0) || (c.Owner != nil && key.AdmissionEpoch > 0 && key.AdmissionEpoch <= c.Owner.Epoch)) &&
 		limits.MaxResultBytes > 0 && limits.MaxResultBytes <= c.Balance.Output && limits.MaxScanBytes <= c.Balance.Scan && limits.MaxRawOutputBytes <= c.Balance.Raw
 }
 
@@ -141,6 +154,17 @@ func (r *Runner) validateRecovery(subject contract.SubjectID, req contract.Start
 	if r.recovery == nil || r.contextPolicies[req.Model].Compaction != nil {
 		return contract.ErrRecoveryUnavailable
 	}
+	if req.Takeover {
+		if r.recovery.Takeover == nil {
+			return contract.ErrRecoveryUnavailable
+		}
+		if e := req.Environment; e != nil {
+			env := r.takeoverEnvironments[e.Ref]
+			if env == nil || !env.FencesWorkspace(e.Workspace) {
+				return contract.ErrRecoveryUnavailable
+			}
+		}
+	}
 	if _, ok := r.allowed[subject][req.Model]; !ok {
 		return contract.ErrAccessDenied
 	}
@@ -150,7 +174,7 @@ func (r *Runner) validateRecovery(subject contract.SubjectID, req contract.Start
 	for _, tool := range req.Tools {
 		binding := r.tools[tool]
 		if _, ok := binding.Tool.(contract.ReceiptProvider); !ok ||
-			(binding.Spec.NeedsArtifactOutput && !r.retainsArtifacts) {
+			(binding.Spec.NeedsArtifactOutput && (!r.retainsArtifacts || (req.Takeover && !r.takeoverArtifacts))) {
 			return contract.ErrRecoveryUnavailable
 		}
 	}
@@ -183,8 +207,16 @@ func (r *Runner) startRecoverable(ctx context.Context, subject contract.SubjectI
 	if id, err := checkExisting(); !errors.Is(err, contract.ErrRunNotFound) {
 		return id, err
 	}
-	lock, err := recoveryLock(path)
+	var lock *os.File
+	if req.Takeover {
+		lock, err = lockTransaction(ctx, path)
+	} else {
+		lock, err = recoveryLock(path)
+	}
 	if err != nil {
+		if req.Takeover {
+			return "", fmt.Errorf("%w: %v", contract.ErrRecoveryStorage, err)
+		}
 		return "", err
 	}
 	keep := false
@@ -218,6 +250,17 @@ func (r *Runner) startRecoverable(ctx context.Context, subject contract.SubjectI
 		WorkspaceVersion: workspace, Permissions: permissions, Deadline: s.deadline,
 		ReconcileTimeout: r.recovery.ReconcileTimeout, Budget: budget, Balance: budget, Step: 1, Messages: s.messages,
 	}
+	var shared *lease
+	if req.Takeover {
+		authorityNow, err := r.leaseClock()
+		if err != nil {
+			s.cancel()
+			return "", fmt.Errorf("%w: %v", contract.ErrRecoveryStorage, err)
+		}
+		duration := r.recovery.Takeover.LeaseDuration
+		c.Owner = &ownership{Instance: r.instance, Epoch: 1, Revision: 1, Expires: authorityNow.Add(duration), Duration: duration}
+		shared = &lease{path: path, id: identity, owner: *c.Owner, clock: r.leaseClock}
+	}
 	renamed, err := durable.Write(path, c)
 	if err != nil {
 		s.cancel()
@@ -226,8 +269,13 @@ func (r *Runner) startRecoverable(ctx context.Context, subject contract.SubjectI
 		}
 		return "", fmt.Errorf("%w: %v", contract.ErrRecoveryStorage, err)
 	}
-	s.checkpoint = &runCheckpoint{data: c, path: path, lock: lock}
-	keep = true
+	s.checkpoint = &runCheckpoint{data: c, path: path}
+	if shared == nil {
+		s.checkpoint.lock = lock
+		keep = true
+	} else {
+		s.attachLease(shared)
+	}
 	r.runs[runKey{subject: subject, id: req.ID}] = s
 	go r.generate(s, subject)
 	return req.ID, nil
@@ -250,30 +298,62 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 		if s.checkpoint == nil || s.expired(time.Now(), r.retention) {
 			return "", contract.ErrRunNotFound
 		}
-		return id, nil
+		s.mu.Lock()
+		current := s.checkpoint.lease
+		if current == nil || !s.finishedAt.IsZero() {
+			s.mu.Unlock()
+			return id, nil
+		}
+		if s.checkpointErr == nil {
+			err := current.owned(ctx, func(*checkpoint, time.Time) error { return nil })
+			if !errors.Is(err, contract.ErrRecoveryOwnershipLost) {
+				s.mu.Unlock()
+				if err != nil {
+					return "", err
+				}
+				return id, nil
+			}
+			s.failCheckpointLocked(err)
+		}
+		s.mu.Unlock()
+		delete(r.runs, key)
 	}
 	path, identity := r.recoveryPath(subject, id)
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return "", contract.ErrRunNotFound
-	}
-	lock, err := recoveryLock(path)
-	if err != nil {
-		return "", err
-	}
-	keep := false
-	defer func() {
-		if !keep {
-			_ = lock.Close()
-		}
-	}()
 	record, err := readCheckpoint(path, identity)
 	if err != nil {
 		return "", err
 	}
+	var lock *os.File
+	var shared *lease
+	if record.Result == nil {
+		if record.Request.Takeover {
+			if r.recovery.Takeover == nil {
+				return "", contract.ErrRecoveryUnavailable
+			}
+			record, shared, err = r.acquireTakeover(ctx, path, identity)
+		} else {
+			lock, err = recoveryLock(path)
+			if err == nil {
+				record, err = readCheckpoint(path, identity)
+			}
+		}
+		if err != nil {
+			if lock != nil {
+				_ = lock.Close()
+			}
+			return "", err
+		}
+	}
+	keep := false
+	defer func() {
+		if lock != nil && !keep {
+			_ = lock.Close()
+		}
+	}()
 	if record.Result != nil && !time.Now().Before(record.FinishedAt.Add(r.retention)) {
 		return "", contract.ErrRunNotFound
 	}
-	if record.Result == nil {
+	if record.Result == nil && shared == nil {
 		if record.BindingVersion != r.recovery.BindingVersion {
 			return "", contract.ErrRecoveryBinding
 		}
@@ -281,7 +361,7 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 			return "", err
 		}
 	}
-	if err := ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil && (shared == nil || record.Result != nil) {
 		return "", err
 	}
 	s := newState(record.Request, record.Budget, record.Deadline, r.observeBufferBytes)
@@ -302,6 +382,9 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 		s.cancel()
 	}
 	keep = true
+	if shared != nil {
+		s.attachLease(shared)
+	}
 	go r.generate(s, subject)
 	return id, nil
 }
@@ -316,15 +399,27 @@ func (s *state) saveLocked() bool {
 	}
 	d.data.Messages, d.data.Usage = s.messages, s.usage
 	d.data.Stop, d.data.StopOutcome = s.stop, s.stopOutcome
-	if _, err := durable.Write(d.path, d.data); err != nil {
-		s.checkpointErr = fmt.Errorf("%w: %v", contract.ErrRecoveryStorage, err)
-		s.cancel()
-		s.events.abandon()
-		close(s.done)
-		// Keep the lease until process exit if the durable position is uncertain.
+	var err error
+	if d.lease == nil {
+		_, err = durable.Write(d.path, d.data)
+	} else {
+		err = d.lease.save(&d.data)
+	}
+	if err != nil {
+		s.failCheckpointLocked(err)
 		return false
 	}
 	return true
+}
+
+func (s *state) failCheckpointLocked(err error) {
+	if s.checkpointErr != nil {
+		return
+	}
+	s.checkpointErr = errors.Join(contract.ErrRecoveryStorage, err)
+	s.cancel()
+	s.events.abandon()
+	close(s.done)
 }
 
 func (r *Runner) workspaceVersion(ctx context.Context, a *activity) (string, error) {
@@ -353,6 +448,8 @@ func (r *Runner) recoveryPermission(s *state, subject contract.SubjectID, tool c
 // SetRetainedArtifacts is set once during local Mesh assembly.
 func (r *Runner) SetRetainedArtifacts(retains bool) { r.retainsArtifacts = retains }
 
+func (r *Runner) SetTakeoverArtifacts(stages bool) { r.takeoverArtifacts = stages }
+
 func (s *state) recordModelIntent(step uint32, balance limits) bool {
 	if s.checkpoint == nil {
 		return true
@@ -363,7 +460,7 @@ func (s *state) recordModelIntent(step uint32, balance limits) bool {
 		return false
 	}
 	d := &s.checkpoint.data
-	d.Step, d.ModelInFlight, d.Balance = step, true, balance
+	d.Step, d.ModelInFlight, d.ModelAdmitted, d.Balance = step, true, false, balance
 	d.ReconcileUntil = time.Time{}
 	return s.saveLocked()
 }
@@ -375,7 +472,7 @@ func (s *state) recordToolIntent(e mesh.EnvironmentRequest, req contract.ToolReq
 	d := &s.checkpoint.data
 	d.Intent = &toolIntent{Key: contract.ReceiptKey{
 		Runner: e.Run.Runner, Subject: e.Run.Subject, RunID: req.RunID, Step: s.step,
-		CallID: req.CallID, Tool: req.Tool, BindingVersion: d.BindingVersion,
+		CallID: req.CallID, Tool: req.Tool, BindingVersion: d.BindingVersion, AdmissionEpoch: e.Run.Epoch,
 		Environment: e.Ref, Workspace: e.Run.Workspace, WorkspaceVersion: d.WorkspaceVersion, Fingerprint: toolFingerprint(req, e.Call.Path),
 	}, Limits: req.Limits, Path: e.Call.Path}
 	d.Balance, d.ReconcileUntil = balance, time.Time{}

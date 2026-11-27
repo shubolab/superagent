@@ -14,6 +14,7 @@ func (l *Local) SetComponents(tools map[contract.ToolRef]contract.LocalToolBindi
 	for ref, binding := range tools {
 		if ref == "" || nilBinding(binding.Tool) || !contract.JSONObject(binding.Spec.InputSchema) ||
 			binding.Spec.Limits.MaxResultBytes == 0 ||
+			(binding.Spec.NeedsWorkspaceWrite && !binding.Spec.NeedsReadAccess) ||
 			(binding.Spec.NeedsReadAccess && (binding.Prepare == nil || binding.Spec.Limits.MaxScanBytes == 0)) ||
 			(binding.Spec.NeedsArtifactOutput && binding.Spec.Limits.MaxRawOutputBytes == 0) {
 			return fmt.Errorf("%w: invalid tool %q", contract.ErrInvalidConfiguration, ref)
@@ -46,7 +47,25 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 	if err := ctx.Err(); err != nil {
 		return MeshReply{}, errors.Join(contract.ErrNotDelivered, err)
 	}
+	if req.Operation == BeginArtifactOutput {
+		if err := admitComponent(ctx, req); err != nil {
+			return MeshReply{}, err
+		}
+	}
 	if req.Operation == BeginArtifactOutput || req.Operation == SettleArtifactOutput {
+		if req.Operation == SettleArtifactOutput && e.Run.Epoch != 0 {
+			guard := takeoverGuard(ctx)
+			if guard == nil {
+				return MeshReply{}, contract.ErrAccessDenied
+			}
+			var reply MeshReply
+			err := guard.Publish(ctx, e.Run, req.ReceiptKey, func() error {
+				result, err := l.artifactCall(ctx, req.Operation, e)
+				reply = result
+				return err
+			})
+			return reply, err
+		}
 		return l.artifactCall(ctx, req.Operation, e)
 	}
 	if req.Operation == VerifyRetainedArtifact {
@@ -56,6 +75,9 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		key := req.ReceiptKey
 		if !validReceiptRoute(key, e) || key.Tool != e.Call.Tool || key.CallID != e.Call.CallID {
 			return MeshReply{}, contract.ErrAccessDenied
+		}
+		if err := admitComponent(ctx, req); err != nil {
+			return MeshReply{}, err
 		}
 		provider, ok := l.tools[key.Tool].Tool.(contract.ReceiptProvider)
 		if !ok {
@@ -74,6 +96,9 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 			req.Tool.EnvironmentGrant != e.Grant || binding.Spec.NeedsReadAccess != (e.Grant != "") ||
 			binding.Spec.NeedsArtifactOutput != (req.Tool.Limits.MaxRawOutputBytes > 0) {
 			return MeshReply{}, errors.Join(contract.ErrNotDelivered, contract.ErrAccessDenied)
+		}
+		if err := admitComponent(ctx, req); err != nil {
+			return MeshReply{}, errors.Join(contract.ErrNotDelivered, err)
 		}
 		toolCtx := contract.WithFileOpener(ctx, func(openCtx context.Context, claimed contract.ToolRequest, path string) (io.ReadCloser, error) {
 			if err := ctx.Err(); err != nil {
@@ -94,7 +119,10 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 			return reply.Reader, err
 		})
 		if binding.Spec.NeedsArtifactOutput {
-			toolCtx = l.withArtifactOutput(toolCtx, e, req.Tool)
+			toolCtx = l.withArtifactOutput(toolCtx, e, req.Tool, req.ReceiptKey)
+		}
+		if binding.Spec.NeedsWorkspaceWrite {
+			toolCtx = l.withWorkspacePublisher(toolCtx, e, req.Tool, req.ReceiptKey)
 		}
 		if key := req.ReceiptKey; key != (contract.ReceiptKey{}) {
 			if !validReceiptRoute(key, e) || key.Tool != req.Tool.Tool || key.CallID != req.Tool.CallID {
@@ -122,6 +150,12 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 
 	switch req.Operation {
 	case VerifyRecoveryWorkspace:
+		if e.Run.Epoch != 0 {
+			fencer, ok := env.(contract.TakeoverWorkspace)
+			if !ok || !fencer.FencesWorkspace(e.Run.Workspace) {
+				return MeshReply{}, contract.ErrRecoveryUnavailable
+			}
+		}
 		verifier, ok := env.(contract.RecoveryWorkspace)
 		if !ok {
 			return MeshReply{}, contract.ErrRecoveryUnavailable
@@ -136,18 +170,39 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		capabilities, err := descriptor.DescribeRead(ctx, e.Run.Workspace)
 		return MeshReply{ReadCapabilities: &capabilities}, err
 	case AllocateEnvironment:
+		if err := admitComponent(ctx, req); err != nil {
+			return MeshReply{}, err
+		}
 		handle, err := env.Allocate(ctx, e.Run)
 		return MeshReply{Handle: handle}, err
 	case GrantEnvironment:
+		if err := admitComponent(ctx, req); err != nil {
+			return MeshReply{}, err
+		}
 		grant, err := env.Grant(ctx, scope, e.Prefix)
+		if err == nil && e.Run.Epoch != 0 {
+			if guardErr := admitComponent(ctx, req); guardErr != nil {
+				_, _ = env.Revoke(context.WithoutCancel(ctx), scope, grant)
+				return MeshReply{}, guardErr
+			}
+		}
 		return MeshReply{Grant: grant}, err
 	case OpenEnvironmentRead:
+		if err := admitComponent(ctx, req); err != nil {
+			return MeshReply{}, err
+		}
 		reader, err := env.OpenRead(ctx, scope, e.Grant, e.Path)
 		return MeshReply{Reader: reader}, err
 	case RevokeEnvironment:
+		if e.Run.Epoch != 0 && !matchesTakeoverScope(ctx, e.Run) {
+			return MeshReply{}, contract.ErrAccessDenied
+		}
 		scanned, err := env.Revoke(ctx, scope, e.Grant)
 		return MeshReply{Scanned: scanned}, err
 	case ReleaseEnvironment:
+		if e.Run.Epoch != 0 && !matchesTakeoverScope(ctx, e.Run) {
+			return MeshReply{}, contract.ErrAccessDenied
+		}
 		return MeshReply{}, env.Release(ctx, e.Run, e.Handle)
 	default:
 		return MeshReply{}, contract.ErrInvalidRequest
@@ -175,6 +230,6 @@ func callComponent(ctx context.Context, transport MeshTransport, req MeshRequest
 
 func validReceiptRoute(key contract.ReceiptKey, e EnvironmentRequest) bool {
 	return key.Runner == e.Run.Runner && key.Subject == e.Run.Subject && key.RunID == e.Run.RunID &&
-		key.Step != 0 && key.Environment == e.Ref && key.Workspace == e.Run.Workspace &&
+		key.Step != 0 && (key.AdmissionEpoch == 0) == (e.Run.Epoch == 0) && key.Environment == e.Ref && key.Workspace == e.Run.Workspace &&
 		key.BindingVersion != "" && key.Fingerprint != ""
 }

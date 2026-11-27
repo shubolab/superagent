@@ -4,6 +4,7 @@ package run
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"maps"
@@ -27,21 +28,25 @@ type runKey struct {
 }
 
 type Runner struct {
-	models             map[contract.ModelRef]struct{}
-	allowed            map[contract.SubjectID]map[contract.ModelRef]struct{}
-	defaults           limits
-	caps               limits
-	observeBufferBytes uint64
-	retention          time.Duration
-	open               OpenModel
-	ref                contract.RunnerRef
-	devices            mesh.MeshTransport
-	tools              map[contract.ToolRef]contract.LocalToolBinding
-	permissions        map[contract.SubjectID]map[contract.ToolRef]contract.ToolPermission
-	defaultEnvironment contract.EnvironmentRef
-	contextPolicies    map[contract.ModelRef]contract.ModelContextPolicy
-	recovery           *contract.RecoveryConfig
-	retainsArtifacts   bool
+	models               map[contract.ModelRef]struct{}
+	allowed              map[contract.SubjectID]map[contract.ModelRef]struct{}
+	defaults             limits
+	caps                 limits
+	observeBufferBytes   uint64
+	retention            time.Duration
+	open                 OpenModel
+	ref                  contract.RunnerRef
+	devices              mesh.MeshTransport
+	tools                map[contract.ToolRef]contract.LocalToolBinding
+	permissions          map[contract.SubjectID]map[contract.ToolRef]contract.ToolPermission
+	defaultEnvironment   contract.EnvironmentRef
+	contextPolicies      map[contract.ModelRef]contract.ModelContextPolicy
+	recovery             *contract.RecoveryConfig
+	retainsArtifacts     bool
+	takeoverArtifacts    bool
+	takeoverEnvironments map[contract.EnvironmentRef]contract.TakeoverWorkspace
+	instance             string
+	leaseClock           func() (time.Time, error)
 
 	mu   sync.Mutex
 	runs map[runKey]*state
@@ -82,7 +87,12 @@ func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open 
 		policy.Compaction = copyValue(policy.Compaction)
 		policies[ref] = policy
 	}
-	if cfg.Recovery != nil {
+	recovery := copyValue(cfg.Recovery)
+	if recovery != nil {
+		recovery.Takeover = copyValue(recovery.Takeover)
+		if recovery.Takeover != nil && recovery.Takeover.LeaseDuration <= 0 {
+			return nil, fmt.Errorf("%w: lease duration must be positive", contract.ErrInvalidConfiguration)
+		}
 		if !durable.Supported || cfg.Recovery.BindingVersion == "" || cfg.Recovery.ReconcileTimeout <= 0 {
 			return nil, fmt.Errorf("%w: invalid recovery configuration", contract.ErrInvalidConfiguration)
 		}
@@ -91,14 +101,14 @@ func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open 
 		}
 	}
 	return &Runner{
-		recovery: copyValue(cfg.Recovery),
-		models:   models, allowed: allowed, defaults: defaults, caps: caps, open: open, contextPolicies: policies,
+		recovery: recovery, instance: rand.Text(), leaseClock: func() (time.Time, error) { return time.Now(), nil },
+		models: models, allowed: allowed, defaults: defaults, caps: caps, open: open, contextPolicies: policies,
 		observeBufferBytes: cfg.ObserveBufferBytes, retention: cfg.ResultRetention, runs: make(map[runKey]*state),
 	}, nil
 }
 
 func (r *Runner) Start(ctx context.Context, subject contract.SubjectID, req contract.StartRequest) (contract.RunID, error) {
-	if req.ID == "" || !utf8.ValidString(req.Instruction) || !utf8.ValidString(req.Input.Text) || !validHistory(req.History) {
+	if req.ID == "" || (req.Takeover && !req.Recoverable) || !utf8.ValidString(req.Instruction) || !utf8.ValidString(req.Input.Text) || !validHistory(req.History) {
 		return "", contract.ErrInvalidRequest
 	}
 	if _, ok := r.models[req.Model]; !ok {

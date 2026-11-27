@@ -81,15 +81,21 @@ func (s *state) finishLocked(outcome contract.RunOutcome, answer *contract.Assis
 	}
 	if answer != nil {
 		result.Messages = append(result.Messages, contract.Message{Assistant: answer})
-		s.events.publish(contract.Event{
-			Kind: contract.EventMessageCompleted, Step: s.step, Message: &contract.AssistantPreview{Text: answer.Text},
-		})
+		if !s.request.Takeover {
+			s.publishAnswerLocked(answer)
+		}
 	}
 	s.result = result
 	// Runs which may hold environment resources publish after their bounded cleanup attempt.
 	if len(s.request.Tools) == 0 {
 		s.publishFinishedLocked("")
 	}
+}
+
+func (s *state) publishAnswerLocked(answer *contract.AssistantMessage) {
+	s.events.publish(contract.Event{
+		Kind: contract.EventMessageCompleted, Step: s.step, Message: &contract.AssistantPreview{Text: answer.Text},
+	})
 }
 
 func (s *state) publishFinishedLocked(cleanup contract.CleanupStatus) {
@@ -106,9 +112,14 @@ func (s *state) publishFinishedLocked(cleanup contract.CleanupStatus) {
 		if !s.saveLocked() {
 			return
 		}
-		_ = d.lock.Close()
+		if d.lock != nil {
+			_ = d.lock.Close()
+		}
 	}
 	s.finishedAt = now
+	if s.request.Takeover && s.result.Answer != nil {
+		s.publishAnswerLocked(s.result.Answer)
+	}
 	s.events.publish(contract.Event{Kind: contract.EventRunFinished, Outcome: s.result.Outcome})
 	if s.result.Outcome != contract.TimedOut {
 		s.cancel()

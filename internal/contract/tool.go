@@ -21,15 +21,17 @@ type EnvironmentRequirement struct {
 }
 
 type ToolPermission struct {
-	Environment    EnvironmentRequirement
-	ReadPrefix     string
-	AllowArtifacts bool
+	Environment         EnvironmentRequirement
+	ReadPrefix          string
+	AllowArtifacts      bool
+	AllowWorkspaceWrite bool `json:",omitempty"`
 }
 
 type ToolSpec struct {
 	Description         string
 	InputSchema         json.RawMessage
 	NeedsReadAccess     bool
+	NeedsWorkspaceWrite bool
 	NeedsContextSource  bool
 	NeedsArtifactOutput bool
 	Limits              ToolLimits
@@ -144,6 +146,7 @@ const (
 )
 
 type RunScope struct {
+	Epoch     uint64 `json:",omitempty"`
 	Runner    RunnerRef
 	Subject   SubjectID
 	RunID     RunID

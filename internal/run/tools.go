@@ -23,6 +23,12 @@ const (
 func (r *Runner) ConfigureTools(ref contract.RunnerRef, transport mesh.MeshTransport, cfg contract.RunnerConfig,
 	tools map[contract.ToolRef]contract.LocalToolBinding, environments map[contract.EnvironmentRef]contract.EnvironmentProvider, artifactStore bool) error {
 	r.ref, r.devices = ref, transport
+	r.takeoverEnvironments = make(map[contract.EnvironmentRef]contract.TakeoverWorkspace)
+	for ref, env := range environments {
+		if capable, ok := env.(contract.TakeoverWorkspace); ok {
+			r.takeoverEnvironments[ref] = capable
+		}
+	}
 	if cfg.DefaultEnvironment != "" {
 		if _, ok := environments[cfg.DefaultEnvironment]; !ok {
 			return fmt.Errorf("%w: unknown default environment %q", contract.ErrInvalidConfiguration, cfg.DefaultEnvironment)
@@ -40,6 +46,9 @@ func (r *Runner) ConfigureTools(ref contract.RunnerRef, transport mesh.MeshTrans
 			binding, ok := tools[tool]
 			if subject == "" || !ok {
 				return fmt.Errorf("%w: invalid tool permission for %q", contract.ErrInvalidConfiguration, tool)
+			}
+			if binding.Spec.NeedsWorkspaceWrite != permission.AllowWorkspaceWrite {
+				return fmt.Errorf("%w: invalid workspace write permission for %q", contract.ErrInvalidConfiguration, tool)
 			}
 			if binding.Spec.NeedsArtifactOutput != permission.AllowArtifacts || (permission.AllowArtifacts && !artifactStore) {
 				return fmt.Errorf("%w: invalid artifact grant for %q", contract.ErrInvalidConfiguration, tool)
@@ -96,6 +105,9 @@ func (r *Runner) admitTools(subject contract.SubjectID, req contract.StartReques
 		if !allowed {
 			return contract.ErrAccessDenied
 		}
+		if binding.Spec.NeedsWorkspaceWrite && !req.Takeover {
+			return contract.ErrRecoveryUnavailable
+		}
 		if binding.Spec.NeedsContextSource {
 			policy := r.contextPolicies[req.Model].Compaction
 			if policy == nil || policy.SourceTool != ref {
@@ -127,6 +139,7 @@ func (r *Runner) modelTools(refs []contract.ToolRef) []contract.ModelTool {
 type activity struct {
 	transport      mesh.MeshTransport
 	env            mesh.EnvironmentRequest
+	guard          mesh.TakeoverGuard
 	readCap        uint64
 	usedArtifacts  bool
 	cleanupPending bool
@@ -141,7 +154,13 @@ func (r *Runner) newActivity(s *state, subject contract.SubjectID) *activity {
 		scope.Workspace = requirement.Workspace
 		ref = requirement.Ref
 	}
-	return &activity{transport: r.devices, env: mesh.EnvironmentRequest{Ref: ref, Run: scope}}
+	a := &activity{transport: r.devices}
+	if s.checkpoint != nil && s.checkpoint.lease != nil {
+		a.guard = s.checkpoint.lease
+		scope.Epoch = s.checkpoint.lease.owner.Epoch
+	}
+	a.env = mesh.EnvironmentRequest{Ref: ref, Run: scope}
+	return a
 }
 
 func (a *activity) allocate(s *state) bool {
@@ -176,7 +195,7 @@ func (a *activity) finish(s *state) {
 		cleanup = contract.CleanupReleased
 	}
 	if a.env.Handle != "" {
-		_, err := cleanupCall(a.transport, mesh.ReleaseEnvironment, a.env)
+		_, err := a.cleanupCall(mesh.ReleaseEnvironment, a.env, contract.ReceiptKey{})
 		cleanup = contract.CleanupReleased
 		if err != nil {
 			cleanup = contract.CleanupPending
@@ -278,8 +297,12 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 		}
 		e.Call.Path = file
 	}
+	current, original := r.recoveryPermission(s, e.Run.Subject, req.Tool)
+	if (binding.Spec.NeedsWorkspaceWrite && !original.AllowWorkspaceWrite) ||
+		(s.request.Takeover && binding.Spec.NeedsArtifactOutput && !original.AllowArtifacts) {
+		return reject("tool_not_authorized")
+	}
 	if binding.Spec.NeedsReadAccess {
-		current, original := r.recoveryPermission(s, e.Run.Subject, req.Tool)
 		_, allowedNow := environment.RelativeFile(current.ReadPrefix, e.Call.Path)
 		_, allowedBefore := environment.RelativeFile(original.ReadPrefix, e.Call.Path)
 		if !allowedNow || !allowedBefore || original.Environment != current.Environment {
@@ -290,6 +313,16 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 			return contract.ToolResult{}, false
 		}
 		e.Prefix = current.ReadPrefix
+	}
+	if s.request.Takeover {
+		s.mu.Lock()
+		saved := s.runningLocked() && s.recordToolIntent(e, req, *balance)
+		s.mu.Unlock()
+		if !saved {
+			return contract.ToolResult{}, false
+		}
+	}
+	if binding.Spec.NeedsReadAccess {
 		grant, err := mesh.CallComponent(s.ctx, a.transport, mesh.GrantEnvironment, e, contract.ToolRequest{})
 		if errors.Is(err, contract.ErrEnvironmentBusy) {
 			return reject("environment_busy")
@@ -304,7 +337,7 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 		reply, err := mesh.CallComponent(s.ctx, a.transport, mesh.BeginArtifactOutput, e, contract.ToolRequest{})
 		if err != nil || reply.RawOutputBytes == 0 || reply.RawOutputBytes > req.Limits.MaxRawOutputBytes {
 			if e.Grant != "" {
-				_, _ = cleanupCall(a.transport, mesh.RevokeEnvironment, e)
+				_, _ = a.cleanupCall(mesh.RevokeEnvironment, e, contract.ReceiptKey{})
 			}
 			return reject("artifact_capacity")
 		}
@@ -316,10 +349,10 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	if !s.runningLocked() || !s.recordToolIntent(e, req, *balance) {
 		s.mu.Unlock()
 		if e.Grant != "" {
-			_, _ = cleanupCall(a.transport, mesh.RevokeEnvironment, e)
+			_, _ = a.cleanupCall(mesh.RevokeEnvironment, e, contract.ReceiptKey{})
 		}
 		if binding.Spec.NeedsArtifactOutput {
-			if _, err := cleanupCall(a.transport, mesh.SettleArtifactOutput, e); err != nil {
+			if _, err := a.cleanupCall(mesh.SettleArtifactOutput, e, contract.ReceiptKey{}); err != nil {
 				a.cleanupPending = true
 			}
 		}
@@ -343,12 +376,12 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	var measured uint64
 	verified := e.Grant == ""
 	if e.Grant != "" {
-		meter, err := cleanupCall(a.transport, mesh.RevokeEnvironment, e)
+		meter, err := a.cleanupCall(mesh.RevokeEnvironment, e, contract.ReceiptKey{})
 		measured, verified = meter.Scanned, err == nil && meter.Scanned <= req.Limits.MaxScanBytes
 	}
 	var raw uint64
 	if binding.Spec.NeedsArtifactOutput {
-		result, raw = a.settleArtifact(e, req, result)
+		result, raw = a.settleArtifact(e, req, result, key)
 	} else if result.Completion != nil && len(result.Completion.Artifacts) != 0 ||
 		result.Usage != nil && result.Usage.RawOutputBytes != nil {
 		result = contract.ToolResult{}
@@ -368,11 +401,11 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	return result, s.settleTool(balance, req, result, toolStatus(result), true, measured, verified, raw)
 }
 
-func (a *activity) settleArtifact(e mesh.EnvironmentRequest, req contract.ToolRequest, result contract.ToolResult) (contract.ToolResult, uint64) {
+func (a *activity) settleArtifact(e mesh.EnvironmentRequest, req contract.ToolRequest, result contract.ToolResult, key contract.ReceiptKey) (contract.ToolResult, uint64) {
 	if validToolResult(result, req.RunID, req.CallID) && result.State == contract.ToolExecutionKnown {
 		e.Artifacts = result.Completion.Artifacts
 	}
-	reply, err := cleanupCall(a.transport, mesh.SettleArtifactOutput, e)
+	reply, err := a.cleanupCall(mesh.SettleArtifactOutput, e, key)
 	if err != nil && (!errors.Is(err, contract.ErrArtifactReceipt) || errors.Is(err, contract.ErrArtifactCleanup)) {
 		a.cleanupPending = true
 	}
@@ -430,12 +463,15 @@ func invoke(ctx context.Context, transport mesh.MeshTransport, e mesh.Environmen
 	return cloneToolResult(response.reply.Tool)
 }
 
-func cleanupCall(transport mesh.MeshTransport, op mesh.Operation, e mesh.EnvironmentRequest) (mesh.MeshReply, error) {
+func (a *activity) cleanupCall(op mesh.Operation, e mesh.EnvironmentRequest, key contract.ReceiptKey) (mesh.MeshReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupGrace)
 	defer cancel()
+	if a.guard != nil {
+		ctx = mesh.WithTakeoverGuard(ctx, a.guard)
+	}
 	reply := make(chan componentReply, 1)
 	go func() {
-		result, err := mesh.CallComponent(ctx, transport, op, e, contract.ToolRequest{})
+		result, err := mesh.CallReceipt(ctx, a.transport, op, e, contract.ToolRequest{}, key)
 		reply <- componentReply{result, err}
 	}()
 	select {
@@ -466,8 +502,11 @@ func (s *state) settleTool(balance *limits, req contract.ToolRequest, result con
 	} else if result.Reason != nil {
 		code = result.Reason.Code
 	}
-	s.events.publish(contract.Event{Kind: contract.EventToolCompleted, Step: s.step,
-		Tool: &contract.ToolEvent{CallID: req.CallID, Tool: req.Tool, Status: status, Code: code}})
+	event := contract.Event{Kind: contract.EventToolCompleted, Step: s.step,
+		Tool: &contract.ToolEvent{CallID: req.CallID, Tool: req.Tool, Status: status, Code: code}}
+	if !s.request.Takeover {
+		s.events.publish(event)
+	}
 	if status == contract.ToolStatusUnknown {
 		stop := &contract.StopDetail{Code: contract.StopToolUnknown, Step: s.step, CallID: req.CallID}
 		if d := s.checkpoint; d != nil {
@@ -506,6 +545,9 @@ func (s *state) settleTool(balance *limits, req contract.ToolRequest, result con
 		d.data.Intent, d.data.Balance = nil, *balance
 		if !s.saveLocked() {
 			return false
+		}
+		if s.request.Takeover {
+			s.events.publish(event)
 		}
 	}
 	if !live {

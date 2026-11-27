@@ -127,6 +127,12 @@ func (l *Local) OpenStream(ctx context.Context, req MeshRequest) (MeshStream, er
 		if opts := req.Model.Context; opts != nil && l.estimateInvalid(req.Model.Model, opts.ProfileVersion) {
 			return nil, contract.ErrContextMeasurementUnavailable
 		}
+		if guard := takeoverGuard(ctx); guard != nil {
+			req.Environment.Run.Subject = subject
+			if err := guard.Admit(ctx, req); err != nil {
+				return nil, err
+			}
+		}
 		stream, err := provider.Generate(ctx, req.Model)
 		if err != nil {
 			return nil, err

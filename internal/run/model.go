@@ -137,7 +137,7 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 		s.addUsageLocked(reply.Usage)
 		assistant := &contract.AssistantMessage{Text: reply.Text, ToolCalls: cloneCalls(reply.ToolCalls)}
 		if d := s.checkpoint; d != nil {
-			d.data.ModelInFlight, d.data.Balance = false, balance
+			d.data.ModelInFlight, d.data.ModelAdmitted, d.data.Balance = false, false, balance
 			if reply.Finish == contract.ModelFinishToolCalls {
 				d.data.Pending = assistant
 				if !s.saveLocked() {

@@ -59,6 +59,9 @@ func NewMesh(cfg MeshConfig) (*Mesh, error) {
 		if retained, ok := cfg.LocalArtifacts.(contract.RetainedArtifactStore); ok {
 			runner.SetRetainedArtifacts(retained.RetainsAcrossRestart())
 		}
+		if staging, ok := cfg.LocalArtifacts.(contract.TakeoverArtifactStore); ok {
+			runner.SetTakeoverArtifacts(staging.StagesUntilPublication())
+		}
 		if err := runner.ConfigureTools(ref, local, config, cfg.LocalTools, cfg.LocalEnvironments, cfg.LocalArtifacts != nil); err != nil {
 			return nil, fmt.Errorf("runner %q: %w", ref, err)
 		}

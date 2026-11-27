@@ -37,6 +37,7 @@ type RunnerConfig struct {
 }
 
 type StartRequest struct {
+	Takeover      bool `json:",omitempty"`
 	Recoverable   bool
 	ID            RunID
 	Model         ModelRef

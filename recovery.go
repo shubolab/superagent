@@ -6,6 +6,7 @@ import (
 
 	"github.com/shubolab/superagent/internal/contract"
 	"github.com/shubolab/superagent/internal/durable"
+	"github.com/shubolab/superagent/internal/environment"
 )
 
 // NewLocalReceiptTool wraps a local tool in a process-safe receipt journal.
@@ -23,4 +24,14 @@ func NewLocalReceiptTool(directory string, tool Tool) (Tool, error) {
 // InvocationReceiptKey returns the key bound by Mesh for a recoverable invocation.
 func InvocationReceiptKey(ctx context.Context) (ReceiptKey, bool) {
 	return contract.InvocationReceiptKey(ctx)
+}
+
+// NewLocalTakeoverEnvironment exposes scoped append operations, with no writable handles.
+func NewLocalTakeoverEnvironment(workspaces map[WorkspaceRef]WorkspaceConfig) (EnvironmentProvider, error) {
+	return environment.NewTakeoverLocal(workspaces)
+}
+
+// PublishToolFile appends staged data to the single path authorized for this invocation.
+func PublishToolFile(ctx context.Context, req ToolRequest, path string, data []byte) error {
+	return contract.PublishToolFile(ctx, req, path, data)
 }
