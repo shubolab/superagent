@@ -17,22 +17,24 @@ import (
 const maxBlocks = 256
 
 type stream struct {
-	reader      *bufio.Reader
-	closeBody   func() error
-	frameLimit  int
-	bytesLeft   uint64
-	step        uint32
-	started     bool
-	complete    bool
-	invalidArgs bool
-	stop        string
-	current     *block
-	blockIndex  uint32
-	text        strings.Builder
-	partial     bytes.Buffer
-	toolCalls   []contract.ModelToolCall
-	ids         map[string]bool
-	usage       tokenUsage
+	reader          *bufio.Reader
+	closeBody       func() error
+	frameLimit      int
+	bytesLeft       uint64
+	thinkingLeft    uint64
+	discardThinking bool
+	step            uint32
+	started         bool
+	complete        bool
+	invalidArgs     bool
+	stop            string
+	current         *block
+	blockIndex      uint32
+	text            strings.Builder
+	partial         bytes.Buffer
+	toolCalls       []contract.ModelToolCall
+	ids             map[string]bool
+	usage           tokenUsage
 }
 
 type frame struct {
@@ -50,6 +52,8 @@ type frame struct {
 		Text        string `json:"text"`
 		PartialJSON string `json:"partial_json"`
 		StopReason  string `json:"stop_reason"`
+		Thinking    string `json:"thinking"`
+		Signature   string `json:"signature"`
 	} `json:"delta"`
 	Usage *tokenUsage `json:"usage"`
 	Error *struct {
@@ -64,11 +68,11 @@ type tokenUsage struct {
 	Output        *uint64 `json:"output_tokens"`
 }
 
-func newStream(body io.ReadCloser, req contract.ModelRequest) *stream {
+func newStream(body io.ReadCloser, req contract.ModelRequest, discardThinking bool) *stream {
 	frameLimit := int(4096 + 6*min(req.MaxOutputBytes, 42<<10))
 	return &stream{
 		reader: bufio.NewReaderSize(body, frameLimit), closeBody: sync.OnceValue(body.Close),
-		frameLimit: frameLimit, bytesLeft: req.MaxOutputBytes, step: req.Step, ids: make(map[string]bool),
+		frameLimit: frameLimit, bytesLeft: req.MaxOutputBytes, thinkingLeft: req.MaxOutputBytes, discardThinking: discardThinking, step: req.Step, ids: make(map[string]bool),
 	}
 }
 
@@ -155,6 +159,14 @@ func (s *stream) handle(event frame) (contract.ModelEvent, error) {
 		switch s.current.Type {
 		case "text":
 			return s.appendText(s.current.Text)
+		case "thinking":
+			if !s.discardThinking {
+				return contract.ModelEvent{}, protocol
+			}
+			if err := s.consumeThinking(len(s.current.Thinking) + len(s.current.Signature)); err != nil {
+				return contract.ModelEvent{}, err
+			}
+			s.current.Thinking, s.current.Signature = "", ""
 		case "tool_use":
 			wireID := s.current.ID
 			if !providerName(wireID) || !providerName(s.current.Name) || s.ids[wireID] || !contract.JSONObject(s.current.Input) {
@@ -175,6 +187,10 @@ func (s *stream) handle(event frame) (contract.ModelEvent, error) {
 		switch {
 		case s.current.Type == "text" && event.Delta.Type == "text_delta":
 			return s.appendText(event.Delta.Text)
+		case s.current.Type == "thinking" && event.Delta.Type == "thinking_delta":
+			return contract.ModelEvent{}, s.consumeThinking(len(event.Delta.Thinking))
+		case s.current.Type == "thinking" && event.Delta.Type == "signature_delta":
+			return contract.ModelEvent{}, s.consumeThinking(len(event.Delta.Signature))
 		case s.current.Type == "tool_use" && event.Delta.Type == "input_json_delta":
 			if !s.charge(len(event.Delta.PartialJSON)) {
 				return contract.ModelEvent{}, contract.ErrModelOutputLimit
@@ -272,6 +288,14 @@ func (s *stream) appendText(text string) (contract.ModelEvent, error) {
 	}
 	s.text.WriteString(text)
 	return contract.ModelEvent{Kind: contract.ModelTextDelta, TextDelta: text}, nil
+}
+
+func (s *stream) consumeThinking(n int) error {
+	if uint64(n) > s.thinkingLeft {
+		return contract.ErrModelOutputLimit
+	}
+	s.thinkingLeft -= uint64(n)
+	return nil
 }
 
 func (s *stream) charge(n int) bool {

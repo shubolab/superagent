@@ -92,6 +92,8 @@ type ModelToolCall struct {
 
 有实测窗口及本地计量配置的宿主可使用 `NewMeteredAnthropicMessagesAdapter`，按供应商 `ModelID` 提供 `AnthropicInputProfile`。本地计量函数接收与 HTTP POST 相同的请求编码，适配器在发送前核对指纹。摘要独立放入历史消息。启用条件见 [上下文压缩验收门槛](stage-a-acceptance.md#上下文压缩接入门槛)。
 
+兼容网关可用 `NewAnthropicMessagesAdapterWithOptions` 选择 Bearer 认证。仅对已验证可省略思考块的网关启用 `DiscardThinking`。思考块和签名独立限额，仍要求流完整结束。真实验收可通过 `SUPERAGENT_ANTHROPIC_BASE_URL`、`SUPERAGENT_ANTHROPIC_AUTH_MODE=bearer` 和 `SUPERAGENT_ANTHROPIC_DISCARD_THINKING=1` 配置相同的连接。
+
 ## 工具派发边界
 
 1. 运行器完整收到 `ModelCompleted` 后，检查结束原因与工具列表是否一致，并检查整批调用的标识、名称和参数 JSON 对象。标识须在本 Run 内首次出现。缺失或重复标识、非法 JSON、结束原因冲突均视为模型协议错误，整批工具均未派发。

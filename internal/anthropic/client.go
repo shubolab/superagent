@@ -21,12 +21,28 @@ const (
 	apiVersion      = "2023-06-01"
 )
 
+type Authentication string
+
+const (
+	AuthAPIKey Authentication = "api_key"
+	AuthBearer Authentication = "bearer"
+)
+
+type Options struct {
+	MaxOutputTokens uint64
+	InputProfiles   map[string]InputProfile
+	Authentication  Authentication
+	DiscardThinking bool
+}
+
 type Client struct {
-	endpoint string
-	key      string
-	tokens   uint64
-	http     *http.Client
-	profiles map[string]InputProfile
+	endpoint        string
+	key             string
+	tokens          uint64
+	http            *http.Client
+	profiles        map[string]InputProfile
+	authentication  Authentication
+	discardThinking bool
 }
 
 var (
@@ -34,8 +50,11 @@ var (
 	errClosed  = errors.New("anthropic stream closed")
 )
 
-func New(endpoint, key string, maxOutputTokens uint64, profiles map[string]InputProfile) (*Client, error) {
-	for model, p := range profiles {
+func New(endpoint, key string, options Options) (*Client, error) {
+	if options.Authentication != "" && options.Authentication != AuthAPIKey && options.Authentication != AuthBearer {
+		return nil, errRequest
+	}
+	for model, p := range options.InputProfiles {
 		if strings.TrimSpace(model) == "" || !p.valid() {
 			return nil, errRequest
 		}
@@ -47,7 +66,7 @@ func New(endpoint, key string, maxOutputTokens uint64, profiles map[string]Input
 		transport = base.Clone()
 	}
 	u, err := url.Parse(endpoint)
-	if err != nil || key == "" || maxOutputTokens == 0 {
+	if err != nil || key == "" || options.MaxOutputTokens == 0 {
 		return nil, errRequest
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/v1/messages"
@@ -56,7 +75,7 @@ func New(endpoint, key string, maxOutputTokens uint64, profiles map[string]Input
 		Transport:     transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return &Client{endpoint: u.String(), key: key, tokens: maxOutputTokens, http: client, profiles: maps.Clone(profiles)}, nil
+	return &Client{endpoint: u.String(), key: key, tokens: options.MaxOutputTokens, http: client, profiles: maps.Clone(options.InputProfiles), authentication: options.Authentication, discardThinking: options.DiscardThinking}, nil
 }
 
 func (c *Client) Generate(ctx context.Context, modelID string, req contract.ModelRequest) (contract.ModelStream, error) {
@@ -81,7 +100,11 @@ func (c *Client) Generate(ctx context.Context, modelID string, req contract.Mode
 	}
 	request.Header.Set("accept", "text/event-stream")
 	request.Header.Set("content-type", "application/json")
-	request.Header.Set("x-api-key", c.key)
+	if c.authentication == AuthBearer {
+		request.Header.Set("authorization", "Bearer "+c.key)
+	} else {
+		request.Header.Set("x-api-key", c.key)
+	}
 	request.Header.Set("anthropic-version", apiVersion)
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -103,7 +126,7 @@ func (c *Client) Generate(ctx context.Context, modelID string, req contract.Mode
 		_ = response.Body.Close()
 		return nil, contract.ErrModelResponseProtocol
 	}
-	return newStream(response.Body, req), nil
+	return newStream(response.Body, req, c.discardThinking), nil
 }
 
 func (c *Client) Close(context.Context) error {
@@ -127,6 +150,8 @@ type message struct {
 
 type block struct {
 	Type      string          `json:"type"`
+	Thinking  string          `json:"thinking,omitempty"`
+	Signature string          `json:"signature,omitempty"`
 	Text      string          `json:"text,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`

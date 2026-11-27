@@ -43,12 +43,17 @@ type wireRequest struct {
 
 func factoryAnthropic(t *testing.T, ctx context.Context, endpoint, id, key string) *superagent.ModelBindings {
 	t.Helper()
+	return factoryAnthropicWithAdapter(t, ctx, endpoint, id, key, superagent.NewAnthropicMessagesAdapter(256))
+}
+
+func factoryAnthropicWithAdapter(t *testing.T, ctx context.Context, endpoint, id, key string, adapter superagent.ModelAdapter) *superagent.ModelBindings {
+	t.Helper()
 	b, err := superagent.NewModelBindings(ctx, superagent.ModelFactoryConfig{
 		Providers: map[superagent.ProviderRef]superagent.ProviderConfig{"claude": {
 			Adapter: "anthropic", Endpoint: endpoint, CredentialRef: "claude-key",
 		}},
 		Models:   map[superagent.ModelRef]superagent.ModelBindingConfig{"chat": {Provider: "claude", ModelID: id}},
-		Adapters: map[string]superagent.ModelAdapter{"anthropic": superagent.NewAnthropicMessagesAdapter(256)},
+		Adapters: map[string]superagent.ModelAdapter{"anthropic": adapter},
 	}, credentialFunc(func(_ context.Context, ref string) (string, error) {
 		if ref != "claude-key" {
 			return "", fmt.Errorf("unexpected credential reference")
@@ -274,6 +279,14 @@ func TestAnthropicHTTPCancelClosesStream(t *testing.T) {
 	}
 }
 
+func liveAnthropicAdapter(maxTokens uint64, profiles map[string]superagent.AnthropicInputProfile) superagent.ModelAdapter {
+	return superagent.NewAnthropicMessagesAdapterWithOptions(superagent.AnthropicMessagesOptions{
+		MaxOutputTokens: maxTokens, InputProfiles: profiles,
+		Authentication:  superagent.AnthropicAuthentication(os.Getenv("SUPERAGENT_ANTHROPIC_AUTH_MODE")),
+		DiscardThinking: os.Getenv("SUPERAGENT_ANTHROPIC_DISCARD_THINKING") == "1",
+	})
+}
+
 func TestAnthropicLiveSearch(t *testing.T) {
 	if os.Getenv("SUPERAGENT_ANTHROPIC_LIVE") != "1" {
 		t.Skip("set SUPERAGENT_ANTHROPIC_LIVE=1 to run the provider smoke test")
@@ -289,7 +302,7 @@ func TestAnthropicLiveSearch(t *testing.T) {
 	rc.DefaultBudget.Timeout = pointer(45 * time.Second)
 	rc.BudgetCaps.Timeout = rc.DefaultBudget.Timeout
 	f.cfg.LocalRunners["main"] = rc
-	b := factoryAnthropic(t, ctx, "", id, key)
+	b := factoryAnthropicWithAdapter(t, ctx, os.Getenv("SUPERAGENT_ANTHROPIC_BASE_URL"), id, key, liveAnthropicAdapter(512, nil))
 	f.cfg.LocalModels = b.LocalModels()
 	req := f.request()
 	req.Instruction = "Call search exactly once for path docs/health.txt and query status. After the result, report the status in one sentence."
@@ -299,5 +312,63 @@ func TestAnthropicLiveSearch(t *testing.T) {
 	if len(res.Messages) != 4 || f.hits.Load() != 1 || f.env.scanned.Load() != 13 ||
 		!strings.Contains(strings.ToLower(res.Answer.Text), "ready") {
 		t.Fatalf("unexpected live provider output: %s, tool runs %d", res.Outcome, f.hits.Load())
+	}
+	if res.Usage != nil {
+		t.Logf("model=%s input_tokens=%d output_tokens=%d tool_calls=%d scanned_bytes=%d", id, res.Usage.InputTokens, res.Usage.OutputTokens, f.hits.Load(), f.env.scanned.Load())
+	}
+}
+
+func TestAnthropicGatewayBearerAndThinking(t *testing.T) {
+	ctx := hostContext(t, "alice")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gateway/claude/v1/messages" || r.Header.Get("Authorization") != "Bearer mock-bearer" ||
+			r.Header.Get("x-api-key") != "" {
+			t.Error("gateway request did not honor scoped Bearer credentials and path")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var body wireRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		messageStart(w)
+		sse(w, "content_block_start", `,"index":0,"content_block":{"type":"thinking","thinking":""}`)
+		sse(w, "content_block_delta", `,"index":0,"delta":{"type":"thinking_delta","thinking":"private reasoning"}`)
+		sse(w, "content_block_delta", `,"index":0,"delta":{"type":"signature_delta","signature":"proof"}`)
+		sse(w, "content_block_stop", `,"index":0`)
+		if requests.Add(1) == 1 {
+			wireTool(w, `{"path":"docs/health.txt","query":"status"}`)
+			messageFinal(w, "tool_use")
+			return
+		}
+		if len(body.Messages) != 3 || len(body.Messages[1].Content) != 1 ||
+			body.Messages[1].Content[0].Type != "tool_use" || body.Messages[1].Content[0].ID != "toolu_fixture" ||
+			body.Messages[2].Content[0].ToolUseID != "toolu_fixture" ||
+			!strings.Contains(body.Messages[2].Content[0].Content, "status=ready") {
+			t.Error("tool round trip included a hidden block or lost its receipt")
+		}
+		wireText(w, 1, "ready")
+		messageFinal(w, "end_turn")
+	}))
+	defer server.Close()
+	f := newSearchFixture(t)
+	adapter := superagent.NewAnthropicMessagesAdapterWithOptions(superagent.AnthropicMessagesOptions{
+		MaxOutputTokens: 256, Authentication: superagent.AnthropicAuthBearer, DiscardThinking: true,
+	})
+	b := factoryAnthropicWithAdapter(t, ctx, server.URL+"/gateway/claude", "test", "mock-bearer", adapter)
+	f.cfg.LocalModels = b.LocalModels()
+	run := start(t, ctx, newClient(t, f.cfg), f.request())
+	got := wait(t, ctx, run, superagent.Succeeded)
+	if requests.Load() != 2 || f.hits.Load() != 1 || got.Answer.Text != "ready" || len(got.Messages) != 4 ||
+		got.Messages[1].Assistant.Text != "" {
+		t.Fatalf("invalid compatible gateway result: %+v", got)
+	}
+	for _, event := range allRunEvents(t, observeRun(t, ctx, run)) {
+		if strings.Contains(event.TextDelta, "private") {
+			t.Error("private reasoning returned as observation")
+		}
 	}
 }

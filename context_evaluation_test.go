@@ -324,9 +324,9 @@ func TestAnthropicLiveCompactionComparison(t *testing.T) {
 		},
 	}
 	bindings, err := superagent.NewModelBindings(t.Context(), superagent.ModelFactoryConfig{
-		Providers: map[superagent.ProviderRef]superagent.ProviderConfig{"live": {Adapter: "anthropic", CredentialRef: "test-api-key"}},
+		Providers: map[superagent.ProviderRef]superagent.ProviderConfig{"live": {Adapter: "anthropic", CredentialRef: "test-api-key", Endpoint: os.Getenv("SUPERAGENT_ANTHROPIC_BASE_URL")}},
 		Models:    map[superagent.ModelRef]superagent.ModelBindingConfig{"chat": {Provider: "live", ModelID: cfg.ModelID}},
-		Adapters: map[string]superagent.ModelAdapter{"anthropic": superagent.NewMeteredAnthropicMessagesAdapter(cfg.OutputTokens,
+		Adapters: map[string]superagent.ModelAdapter{"anthropic": liveAnthropicAdapter(cfg.OutputTokens,
 			map[string]superagent.AnthropicInputProfile{cfg.ModelID: meter})},
 	}, credentialFunc(func(context.Context, string) (string, error) { return key, nil }))
 	if err != nil {
