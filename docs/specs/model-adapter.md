@@ -88,7 +88,7 @@ type ModelToolCall struct {
 
 `Recv` 每次返回一个事件或一个错误，`Kind` 决定有效载荷。单个调用方按顺序读取，`Generate` 的 `context` 覆盖整个流。`Close` 可重复调用，也可解除阻塞的 `Recv`。运行器收到完整 `ModelCompleted` 事件后即可校验并关闭流，后续关闭错误记入诊断。
 
-Anthropic Messages API 可以作为适配验证样例。适配器收集文本和工具内容块，从 `message_delta` 读取用量和结束原因，等到 `message_stop` 并验证内容完整后，才将 `end_turn` 或 `tool_use` 映射为对应的完成类型。`max_tokens` 按截断处理。 [流式事件](https://platform.claude.com/docs/en/build-with-claude/streaming#event-types) · [停止原因](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons)
+宿主可用 `NewAnthropicMessagesAdapter(maxOutputTokens)` 登记 Anthropic Messages。适配器按 API 版本 `2023-06-01` 发送普通文本和客户端工具。在完整内容块、结束原因和 `message_stop` 齐全后将 `end_turn`、`tool_use` 映射为完成事件，`max_tokens` 映射为截断。端点使用带可选路径前缀的基础 URL，适配器追加 `/v1/messages`。 [API 版本](https://platform.claude.com/docs/en/api/messages/create?version=2023-06-01) · [流式事件](https://platform.claude.com/docs/en/build-with-claude/streaming#event-types)
 
 ## 工具派发边界
 
@@ -124,3 +124,6 @@ Anthropic Messages API 可以作为适配验证样例。适配器收集文本和
 | 出现文本后断流，或供应商以截断结束 | 界面保留草稿。该轮未产生 `message.completed`，工具派发次数为零 |
 | 已接受完整回复后底层连接关闭 | 按回复推进，最终结果与正常关闭一致 |
 | 收到 `ModelCompleted` 后、第一次工具派发前取消生效 | 待派发工具执行次数为零。Run 返回取消终态 |
+
+
+真实供应商冒烟使用 `TestAnthropicLiveSearch`。宿主提供 `ANTHROPIC_API_KEY` 和 `SUPERAGENT_ANTHROPIC_MODEL`，并设置 `SUPERAGENT_ANTHROPIC_LIVE=1` 后运行 `go test -run '^TestAnthropicLiveSearch$' -v`。普通测试用本地 HTTP 服务器覆盖协议和两个模型回合。
