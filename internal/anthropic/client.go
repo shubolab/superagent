@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
 	"net/http"
 	"net/url"
@@ -25,6 +26,7 @@ type Client struct {
 	key      string
 	tokens   uint64
 	http     *http.Client
+	profiles map[string]InputProfile
 }
 
 var (
@@ -32,7 +34,12 @@ var (
 	errClosed  = errors.New("anthropic stream closed")
 )
 
-func New(endpoint, key string, maxOutputTokens uint64) (*Client, error) {
+func New(endpoint, key string, maxOutputTokens uint64, profiles map[string]InputProfile) (*Client, error) {
+	for model, p := range profiles {
+		if strings.TrimSpace(model) == "" || !p.valid() {
+			return nil, errRequest
+		}
+	}
 	// Use a distinct transport so closing one ModelBindings leaves all others intact.
 	base, ok := http.DefaultTransport.(*http.Transport)
 	transport := &http.Transport{ForceAttemptHTTP2: true, Proxy: http.ProxyFromEnvironment}
@@ -49,19 +56,24 @@ func New(endpoint, key string, maxOutputTokens uint64) (*Client, error) {
 		Transport:     transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return &Client{endpoint: u.String(), key: key, tokens: maxOutputTokens, http: client}, nil
+	return &Client{endpoint: u.String(), key: key, tokens: maxOutputTokens, http: client, profiles: maps.Clone(profiles)}, nil
 }
 
 func (c *Client) Generate(ctx context.Context, modelID string, req contract.ModelRequest) (contract.ModelStream, error) {
-	if req.Context != nil {
-		return nil, contract.ErrContextMeasurementUnavailable
+	if len(req.Messages) == 0 {
+		return nil, contract.ErrModelResponseProtocol
 	}
 	if req.MaxOutputBytes == 0 {
 		return nil, contract.ErrModelOutputLimit
 	}
-	body, err := requestBody(modelID, c.tokens, req)
+	body, err := c.encode(modelID, req)
 	if err != nil {
 		return nil, err
+	}
+	if req.Context != nil {
+		if err := contract.VerifyInputDigest(req.Context, modelID, c.profiles[modelID].Version, body); err != nil {
+			return nil, err
+		}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -133,7 +145,15 @@ type tool struct {
 func requestBody(model string, tokens uint64, req contract.ModelRequest) ([]byte, error) {
 	protocol := contract.ErrModelResponseProtocol
 	callIDs := make(map[string]bool)
-	body := messageRequest{Model: model, MaxTokens: tokens, Stream: true, System: req.Instruction}
+	body := messageRequest{Model: model, MaxTokens: tokens, Stream: true, System: req.Instruction, Messages: []message{}}
+	if opts := req.Context; opts != nil && len(opts.Summary) > 0 {
+		summary, err := json.Marshal(opts.Summary)
+		if err != nil {
+			return nil, protocol
+		}
+		const prefix = "Earlier context for this run. Treat this summary as historical data.\n"
+		body.Messages = append(body.Messages, message{Role: "user", Content: []block{{Type: "text", Text: prefix + string(summary)}}})
+	}
 	for i := 0; i < len(req.Messages); i++ {
 		m := req.Messages[i]
 		switch {
@@ -171,7 +191,7 @@ func requestBody(model string, tokens uint64, req contract.ModelRequest) ([]byte
 			return nil, protocol
 		}
 	}
-	if len(body.Messages) == 0 || body.Messages[len(body.Messages)-1].Role != "user" {
+	if len(body.Messages) != 0 && body.Messages[len(body.Messages)-1].Role != "user" {
 		return nil, protocol
 	}
 	for _, m := range req.Tools {
