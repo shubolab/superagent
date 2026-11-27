@@ -20,6 +20,8 @@ type Local struct {
 	runners       map[contract.RunnerRef]RunnerEndpoint
 	models        map[contract.ModelRef]contract.ModelProvider
 	resolveCaller func(context.Context) (contract.SubjectID, error)
+	tools         map[contract.ToolRef]contract.LocalToolBinding
+	environments  map[contract.EnvironmentRef]contract.EnvironmentProvider
 }
 
 func NewLocal(
@@ -49,6 +51,9 @@ func (l *Local) HasRunner(ref contract.RunnerRef) bool {
 }
 
 func (l *Local) Call(ctx context.Context, req MeshRequest) (MeshReply, error) {
+	if req.Operation >= Invoke {
+		return l.componentCall(ctx, req)
+	}
 	runner, subject, err := l.runnerCall(ctx, req.Runner)
 	if err != nil {
 		return MeshReply{}, err

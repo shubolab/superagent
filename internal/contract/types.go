@@ -17,11 +17,16 @@ type Budget struct {
 	MaxModelRequests   *uint64
 	MaxModelInputBytes *uint64
 	MaxOutputBytes     *uint64
+	MaxToolRequests    *uint64
+	MaxToolScanBytes   *uint64
 }
 
 type RunnerConfig struct {
 	AllowedModels      map[SubjectID][]ModelRef
+	AllowedTools       map[SubjectID]map[ToolRef]ToolPermission
 	DefaultBudget      Budget
+	Tools              []ToolRef
+	Environment        *EnvironmentRequirement
 	BudgetCaps         Budget
 	ObserveBufferBytes uint64
 	ResultRetention    time.Duration
@@ -34,11 +39,14 @@ type StartRequest struct {
 	History     []Message
 	Input       UserMessage
 	Budget      Budget
+	Tools       []ToolRef
+	Environment *EnvironmentRequirement
 }
 
 type Message struct {
 	User      *UserMessage
 	Assistant *AssistantMessage
+	Tool      *ToolMessage `json:",omitempty"`
 }
 
 type UserMessage struct {
@@ -46,7 +54,8 @@ type UserMessage struct {
 }
 
 type AssistantMessage struct {
-	Text string
+	Text      string
+	ToolCalls []ModelToolCall `json:",omitempty"`
 }
 
 type ModelProvider interface {
@@ -59,6 +68,7 @@ type ModelRequest struct {
 	Model          ModelRef
 	Instruction    string
 	Messages       []Message
+	Tools          []ModelTool
 	MaxOutputBytes uint64
 }
 
@@ -89,9 +99,10 @@ const (
 )
 
 type ModelReply struct {
-	Finish ModelFinishReason
-	Text   string
-	Usage  *Usage
+	Finish    ModelFinishReason
+	Text      string
+	Usage     *Usage
+	ToolCalls []ModelToolCall
 }
 
 type Usage struct {
@@ -112,6 +123,8 @@ const (
 	EventTextDelta        EventKind = "text.delta"
 	EventMessageCompleted EventKind = "message.completed"
 	EventRunFinished      EventKind = "run.finished"
+	EventToolDispatched   EventKind = "tool.dispatched"
+	EventToolCompleted    EventKind = "tool.completed"
 )
 
 type Event struct {
@@ -122,38 +135,48 @@ type Event struct {
 	TextDelta string
 	Message   *AssistantPreview
 	Outcome   RunOutcome
+	Tool      *ToolEvent `json:",omitempty"`
 }
 
 type AssistantPreview struct {
-	Text string
+	Text  string
+	Calls []ToolEvent `json:",omitempty"`
 }
 
 type RunOutcome string
 
 const (
-	Succeeded      RunOutcome = "Succeeded"
-	Cancelled      RunOutcome = "Cancelled"
-	TimedOut       RunOutcome = "TimedOut"
-	BudgetExceeded RunOutcome = "BudgetExceeded"
-	Failed         RunOutcome = "Failed"
+	Succeeded          RunOutcome = "Succeeded"
+	Cancelled          RunOutcome = "Cancelled"
+	TimedOut           RunOutcome = "TimedOut"
+	BudgetExceeded     RunOutcome = "BudgetExceeded"
+	Failed             RunOutcome = "Failed"
+	ToolOutcomeUnknown RunOutcome = "ToolOutcomeUnknown"
 )
 
 type StopCode string
 
 const (
-	StopCancelled        StopCode = "run_cancelled"
-	StopDeadline         StopCode = "run_deadline"
-	StopModelFailure     StopCode = "model_request_failed"
-	StopModelTruncated   StopCode = "model_truncated"
-	StopModelProtocol    StopCode = "model_protocol_error"
-	StopModelInputLimit  StopCode = "model_input_limit"
-	StopModelOutputLimit StopCode = "model_output_limit"
+	StopCancelled          StopCode = "run_cancelled"
+	StopDeadline           StopCode = "run_deadline"
+	StopModelFailure       StopCode = "model_request_failed"
+	StopModelTruncated     StopCode = "model_truncated"
+	StopModelProtocol      StopCode = "model_protocol_error"
+	StopModelInputLimit    StopCode = "model_input_limit"
+	StopModelOutputLimit   StopCode = "model_output_limit"
+	StopModelRequestLimit  StopCode = "model_request_limit"
+	StopToolRequestLimit   StopCode = "tool_request_limit"
+	StopToolScanLimit      StopCode = "tool_scan_limit"
+	StopToolReceiptLimit   StopCode = "tool_receipt_limit"
+	StopToolUnknown        StopCode = "tool_outcome_unknown"
+	StopEnvironmentFailure StopCode = "environment_failed"
 )
 
 type StopDetail struct {
 	Code       StopCode
 	Step       uint32
 	LimitBytes uint64
+	CallID     CallID
 }
 
 type Result struct {
@@ -163,6 +186,7 @@ type Result struct {
 	Messages []Message
 	Usage    *Usage
 	Stop     *StopDetail
+	Cleanup  CleanupStatus
 }
 
 var (

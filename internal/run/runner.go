@@ -2,14 +2,17 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/shubolab/superagent/internal/contract"
+	"github.com/shubolab/superagent/internal/mesh"
 )
 
 type OpenModel func(context.Context, contract.SubjectID, contract.ModelRequest) (contract.ModelStream, error)
@@ -27,6 +30,10 @@ type Runner struct {
 	observeBufferBytes uint64
 	retention          time.Duration
 	open               OpenModel
+	ref                contract.RunnerRef
+	devices            mesh.MeshTransport
+	tools              map[contract.ToolRef]contract.LocalToolBinding
+	permissions        map[contract.SubjectID]map[contract.ToolRef]contract.ToolPermission
 
 	mu   sync.Mutex
 	runs map[runKey]*state
@@ -36,7 +43,7 @@ func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open 
 	defaults, defaultsOK := configuredBudget(cfg.DefaultBudget)
 	caps, capsOK := configuredBudget(cfg.BudgetCaps)
 	if !defaultsOK || !capsOK || defaults.timeout > caps.timeout || defaults.modelRequests > caps.modelRequests ||
-		defaults.modelInput > caps.modelInput || defaults.output > caps.output {
+		defaults.modelInput > caps.modelInput || defaults.output > caps.output || defaults.toolRequests > caps.toolRequests || defaults.scan > caps.scan {
 		return nil, fmt.Errorf("%w: invalid default budget or caps", contract.ErrInvalidConfiguration)
 	}
 	if cfg.ObserveBufferBytes == 0 || cfg.ResultRetention <= 0 || open == nil {
@@ -75,7 +82,12 @@ func (r *Runner) Start(ctx context.Context, subject contract.SubjectID, req cont
 	if !ok {
 		return "", contract.ErrInvalidRequest
 	}
+	if err := r.admitTools(subject, req); err != nil {
+		return "", err
+	}
 	req.History = cloneMessages(req.History)
+	req.Tools = slices.Clone(req.Tools)
+	req.Environment = copyValue(req.Environment)
 	req.Budget = cloneBudget(req.Budget)
 	key := runKey{subject: subject, id: req.ID}
 
@@ -152,16 +164,35 @@ func (r *Runner) Cancel(ctx context.Context, subject contract.SubjectID, id cont
 		return err
 	}
 	if s.runningLocked() {
-		s.finishLocked(contract.Cancelled, nil, nil, &contract.StopDetail{Code: contract.StopCancelled})
+		s.stopLocked(contract.Cancelled, contract.StopCancelled)
 	}
 	return nil
 }
 
 func validHistory(history []contract.Message) bool {
-	for _, m := range history {
+	for i := 0; i < len(history); i++ {
+		m := history[i]
+		if m.Tool != nil {
+			return false
+		}
 		switch {
 		case m.User != nil && m.Assistant == nil && utf8.ValidString(m.User.Text):
 		case m.Assistant != nil && m.User == nil && utf8.ValidString(m.Assistant.Text):
+			if !validCalls(m.Assistant.ToolCalls, nil) {
+				return false
+			}
+			for _, call := range m.Assistant.ToolCalls {
+				i++
+				if i == len(history) {
+					return false
+				}
+				paired := history[i]
+				if paired.Tool == nil || paired.User != nil || paired.Assistant != nil || paired.Tool.Tool != call.Tool ||
+					paired.Tool.Result.CallID != call.CallID || !validToolResult(paired.Tool.Result, paired.Tool.Result.RunID, call.CallID) ||
+					paired.Tool.Result.State == contract.ToolExecutionUnknown {
+					return false
+				}
+			}
 		default:
 			return false
 		}
@@ -175,7 +206,10 @@ func cloneMessages(in []contract.Message) []contract.Message {
 	}
 	out := make([]contract.Message, len(in))
 	for i, m := range in {
-		out[i] = contract.Message{User: copyValue(m.User), Assistant: copyValue(m.Assistant)}
+		out[i] = contract.Message{User: copyValue(m.User), Assistant: cloneAssistant(m.Assistant), Tool: copyValue(m.Tool)}
+		if out[i].Tool != nil {
+			out[i].Tool.Result = cloneToolResult(out[i].Tool.Result)
+		}
 	}
 	return out
 }
@@ -186,11 +220,13 @@ func cloneBudget(b contract.Budget) contract.Budget {
 		MaxModelRequests:   copyValue(b.MaxModelRequests),
 		MaxModelInputBytes: copyValue(b.MaxModelInputBytes),
 		MaxOutputBytes:     copyValue(b.MaxOutputBytes),
+		MaxToolRequests:    copyValue(b.MaxToolRequests),
+		MaxToolScanBytes:   copyValue(b.MaxToolScanBytes),
 	}
 }
 
 func cloneResult(result contract.Result) contract.Result {
-	result.Answer = copyValue(result.Answer)
+	result.Answer = cloneAssistant(result.Answer)
 	result.Messages = cloneMessages(result.Messages)
 	result.Usage = copyValue(result.Usage)
 	result.Stop = copyValue(result.Stop)
@@ -203,4 +239,30 @@ func copyValue[T any](p *T) *T {
 	}
 	value := *p
 	return &value
+}
+
+func cloneCalls(calls []contract.ModelToolCall) []contract.ModelToolCall {
+	copy := slices.Clone(calls)
+	for i := range copy {
+		copy[i].Arguments = bytes.Clone(copy[i].Arguments)
+	}
+	return copy
+}
+
+func cloneAssistant(message *contract.AssistantMessage) *contract.AssistantMessage {
+	clone := copyValue(message)
+	if clone != nil {
+		clone.ToolCalls = cloneCalls(clone.ToolCalls)
+	}
+	return clone
+}
+
+func cloneToolResult(result contract.ToolResult) contract.ToolResult {
+	result.Completion = copyValue(result.Completion)
+	result.Reason = copyValue(result.Reason)
+	result.Usage = copyValue(result.Usage)
+	if result.Usage != nil {
+		result.Usage.ScannedBytes = copyValue(result.Usage.ScannedBytes)
+	}
+	return result
 }

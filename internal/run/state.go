@@ -16,17 +16,25 @@ type state struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 
-	mu         sync.Mutex
-	finishedAt time.Time
-	result     contract.Result
-	events     observationBuffer
+	mu          sync.Mutex
+	finishedAt  time.Time
+	result      contract.Result
+	events      observationBuffer
+	step        uint32
+	messages    []contract.Message
+	activeCall  contract.CallID
+	stopOutcome contract.RunOutcome
+	stop        *contract.StopDetail
+	usage       *contract.Usage
 }
 
 func newState(req contract.StartRequest, budget limits, deadline time.Time, bufferBytes uint64) *state {
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	input := req.Input
 	s := &state{
 		request: req, budget: budget, deadline: deadline, ctx: ctx, cancel: cancel,
 		done: make(chan struct{}), events: newObservationBuffer(req.ID, bufferBytes),
+		messages: []contract.Message{{User: &input}},
 	}
 	s.events.publish(contract.Event{Kind: contract.EventRunStarted})
 	return s
@@ -39,33 +47,50 @@ func (s *state) expired(now time.Time, retention time.Duration) bool {
 }
 
 func (s *state) runningLocked() bool {
-	if !s.finishedAt.IsZero() {
+	if s.result.Outcome != "" || s.stop != nil {
 		return false
 	}
 	if !time.Now().Before(s.deadline) {
-		s.finishLocked(contract.TimedOut, nil, nil, &contract.StopDetail{Code: contract.StopDeadline})
+		s.stopLocked(contract.TimedOut, contract.StopDeadline)
 		return false
 	}
 	return true
 }
 
+func (s *state) stopLocked(outcome contract.RunOutcome, code contract.StopCode) {
+	s.stopOutcome = outcome
+	s.stop = &contract.StopDetail{Code: code, Step: s.step, CallID: s.activeCall}
+	if outcome != contract.TimedOut {
+		s.cancel()
+	}
+	if s.activeCall == "" {
+		s.finishLocked(outcome, nil, nil, s.stop)
+	}
+}
+
 func (s *state) finishLocked(outcome contract.RunOutcome, answer *contract.AssistantMessage, usage *contract.Usage, stop *contract.StopDetail) {
-	input := s.request.Input
 	result := contract.Result{
 		RunID: s.request.ID, Outcome: outcome, Answer: answer, Usage: copyValue(usage), Stop: stop,
-		Messages: []contract.Message{{User: &input}},
+		Messages: s.messages,
 	}
 	if answer != nil {
 		result.Messages = append(result.Messages, contract.Message{Assistant: answer})
 		s.events.publish(contract.Event{
-			Kind: contract.EventMessageCompleted, Step: 1, Message: &contract.AssistantPreview{Text: answer.Text},
+			Kind: contract.EventMessageCompleted, Step: s.step, Message: &contract.AssistantPreview{Text: answer.Text},
 		})
 	}
 	s.result = result
+	// Runs which may hold environment resources publish after their bounded cleanup attempt.
+	if len(s.request.Tools) == 0 {
+		s.publishFinishedLocked("")
+	}
+}
+
+func (s *state) publishFinishedLocked(cleanup contract.CleanupStatus) {
+	s.result.Cleanup = cleanup
 	s.finishedAt = time.Now()
-	s.events.publish(contract.Event{Kind: contract.EventRunFinished, Outcome: outcome})
-	// A timed-out Run lets the deadline context report DeadlineExceeded to its model.
-	if outcome != contract.TimedOut {
+	s.events.publish(contract.Event{Kind: contract.EventRunFinished, Outcome: s.result.Outcome})
+	if s.result.Outcome != contract.TimedOut {
 		s.cancel()
 	}
 	close(s.done)

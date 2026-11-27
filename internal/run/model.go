@@ -21,33 +21,89 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 	})
 	defer stopDeadline()
 
-	if s.ctx.Err() != nil {
+	env := r.newActivity(s, subject)
+	if len(s.request.Tools) != 0 {
+		defer env.finish(s)
+	}
+	if !env.allocate(s) {
+		return
+	}
+
+	balance := s.budget
+	committedIDs := make(map[contract.CallID]struct{})
+	for step := uint32(1); ; step++ {
 		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.runningLocked()
-		return
+		if !s.runningLocked() {
+			s.mu.Unlock()
+			return
+		}
+		s.step = step
+		committed := s.messages
+		s.mu.Unlock()
+		req := contract.ModelRequest{
+			RunID: s.request.ID, Step: step, Model: s.request.Model, Instruction: s.request.Instruction,
+			Messages: append(cloneMessages(s.request.History), cloneMessages(committed)...),
+			Tools:    r.modelTools(s.request.Tools), MaxOutputBytes: balance.output,
+		}
+		input, fits := inputSize(req, balance.modelInput)
+		switch {
+		case balance.modelRequests == 0 || step == 0:
+			s.failModel(contract.BudgetExceeded, contract.StopModelRequestLimit, s.budget.modelRequests)
+			return
+		case !fits:
+			s.failModel(contract.BudgetExceeded, contract.StopModelInputLimit, s.budget.modelInput)
+			return
+		case balance.output == 0:
+			s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
+			return
+		}
+		balance.modelRequests--
+		balance.modelInput -= input
+		reply, output := r.modelReply(s, subject, req, committedIDs)
+		if reply == nil {
+			return
+		}
+		balance.output -= output
+		s.mu.Lock()
+		if !s.runningLocked() {
+			s.mu.Unlock()
+			return
+		}
+		if reply.Usage != nil {
+			if s.usage == nil {
+				s.usage = &contract.Usage{}
+			}
+			s.usage.InputTokens = addUsage(s.usage.InputTokens, reply.Usage.InputTokens)
+			s.usage.OutputTokens = addUsage(s.usage.OutputTokens, reply.Usage.OutputTokens)
+		}
+		assistant := &contract.AssistantMessage{Text: reply.Text, ToolCalls: cloneCalls(reply.ToolCalls)}
+		if reply.Finish == contract.ModelFinishStop {
+			s.finishLocked(contract.Succeeded, assistant, s.usage, nil)
+			s.mu.Unlock()
+			return
+		}
+		preview := &contract.AssistantPreview{Text: reply.Text}
+		for _, call := range assistant.ToolCalls {
+			preview.Calls = append(preview.Calls, contract.ToolEvent{CallID: call.CallID, Tool: call.Tool})
+			committedIDs[call.CallID] = struct{}{}
+		}
+		s.events.publish(contract.Event{Kind: contract.EventMessageCompleted, Step: step, Message: preview})
+		s.mu.Unlock()
+		if !r.toolBatch(s, env, &balance, assistant) {
+			return
+		}
 	}
-	input := s.request.Input
-	req := contract.ModelRequest{
-		RunID: s.request.ID, Step: 1, Model: s.request.Model, Instruction: s.request.Instruction,
-		Messages:       append(cloneMessages(s.request.History), contract.Message{User: &input}),
-		MaxOutputBytes: s.budget.output,
+}
+
+func (r *Runner) modelReply(s *state, subject contract.SubjectID, req contract.ModelRequest, used map[contract.CallID]struct{}) (*contract.ModelReply, uint64) {
+	if s.ctx.Err() != nil {
+		s.failModel(contract.Failed, contract.StopModelFailure, 0)
+		return nil, 0
 	}
-	if !inputFits(req, s.budget.modelInput) {
-		s.failModel(contract.BudgetExceeded, contract.StopModelInputLimit, s.budget.modelInput)
-		return
-	}
-	s.mu.Lock()
-	proceed := s.runningLocked()
-	s.mu.Unlock()
-	if !proceed {
-		return
-	}
-	// The pure text slice schedules only this one attempt.
 	stream, err := r.open(s.ctx, subject, req)
 	if err != nil || stream == nil {
 		s.failModel(contract.Failed, contract.StopModelFailure, 0)
-		return
+		return nil, 0
 	}
 	closeStream := sync.OnceFunc(func() { _ = stream.Close() })
 	defer closeStream()
@@ -63,75 +119,94 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 				code = contract.StopModelTruncated
 			}
 			s.failModel(contract.Failed, code, 0)
-			return
+			return nil, 0
 		}
 		switch event.Kind {
 		case contract.ModelTextDelta:
-			if event.TextDelta == "" || event.Reply != nil {
+			if event.TextDelta == "" || event.Reply != nil || !utf8.ValidString(event.TextDelta) {
 				s.failModel(contract.Failed, contract.StopModelProtocol, 0)
-				return
+				return nil, 0
 			}
-			if uint64(draft.Len())+uint64(len(event.TextDelta)) > s.budget.output {
+			if uint64(draft.Len())+uint64(len(event.TextDelta)) > req.MaxOutputBytes {
 				s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
-				return
-			}
-			if !utf8.ValidString(event.TextDelta) {
-				s.failModel(contract.Failed, contract.StopModelProtocol, 0)
-				return
+				return nil, 0
 			}
 			s.mu.Lock()
 			if !s.runningLocked() {
 				s.mu.Unlock()
-				return
+				return nil, 0
 			}
 			draft.WriteString(event.TextDelta)
-			s.events.publish(contract.Event{Kind: contract.EventTextDelta, Step: 1, TextDelta: event.TextDelta})
+			s.events.publish(contract.Event{Kind: contract.EventTextDelta, Step: req.Step, TextDelta: event.TextDelta})
 			s.mu.Unlock()
 		case contract.ModelCompleted:
-			s.completeModel(draft.String(), event)
-			return
+			return s.acceptModel(req, draft.String(), event, used)
 		default:
 			s.failModel(contract.Failed, contract.StopModelProtocol, 0)
-			return
+			return nil, 0
 		}
 	}
-	// A deadline can exit the receive loop before the AfterFunc starts.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.runningLocked()
+	s.failModel(contract.Failed, contract.StopModelFailure, 0)
+	return nil, 0
 }
 
 func (s *state) failModel(outcome contract.RunOutcome, code contract.StopCode, limit uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.runningLocked() {
-		s.finishLocked(outcome, nil, nil, &contract.StopDetail{Code: code, Step: 1, LimitBytes: limit})
+		s.finishLocked(outcome, nil, s.usage, &contract.StopDetail{Code: code, Step: s.step, LimitBytes: limit})
 	}
 }
 
-func (s *state) completeModel(draft string, event contract.ModelEvent) {
+func (s *state) acceptModel(req contract.ModelRequest, draft string, event contract.ModelEvent, used map[contract.CallID]struct{}) (*contract.ModelReply, uint64) {
 	reply := event.Reply
-	if reply == nil || reply.Finish != contract.ModelFinishStop || event.TextDelta != "" {
+	if reply == nil || event.TextDelta != "" || !utf8.ValidString(reply.Text) ||
+		(reply.Finish == contract.ModelFinishStop && len(reply.ToolCalls) != 0) ||
+		(reply.Finish == contract.ModelFinishToolCalls && (len(reply.ToolCalls) == 0 || len(req.Tools) == 0)) ||
+		(reply.Finish != contract.ModelFinishStop && reply.Finish != contract.ModelFinishToolCalls) {
 		s.failModel(contract.Failed, contract.StopModelProtocol, 0)
-		return
+		return nil, 0
 	}
-	if uint64(len(reply.Text)) > s.budget.output {
+	output := uint64(len(draft)) + uint64(len(reply.Text)-sharedTextPrefix(draft, reply.Text))
+	for _, call := range reply.ToolCalls {
+		bytes := uint64(len(call.CallID)) + uint64(len(call.Tool)) + uint64(len(call.Arguments))
+		if output > req.MaxOutputBytes || bytes > req.MaxOutputBytes-output {
+			s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
+			return nil, 0
+		}
+		output += bytes
+	}
+	if output > req.MaxOutputBytes {
 		s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
-		return
+		return nil, 0
 	}
-	if !utf8.ValidString(reply.Text) {
+	if !validCalls(reply.ToolCalls, used) {
 		s.failModel(contract.Failed, contract.StopModelProtocol, 0)
-		return
+		return nil, 0
 	}
-	if uint64(len(draft))+uint64(len(reply.Text)-sharedTextPrefix(draft, reply.Text)) > s.budget.output {
-		s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
-		return
+	snapshot := *reply
+	snapshot.Usage = copyValue(reply.Usage)
+	snapshot.ToolCalls = cloneCalls(reply.ToolCalls)
+	return &snapshot, output
+}
+
+func validCalls(calls []contract.ModelToolCall, prior map[contract.CallID]struct{}) bool {
+	seen := make(map[contract.CallID]struct{}, len(calls))
+	for _, call := range calls {
+		_, repeated := seen[call.CallID]
+		_, reused := prior[call.CallID]
+		if call.CallID == "" || call.Tool == "" || !utf8.ValidString(string(call.CallID)) ||
+			!utf8.ValidString(string(call.Tool)) || !utf8.Valid(call.Arguments) ||
+			!contract.JSONObject(call.Arguments) || repeated || reused {
+			return false
+		}
+		seen[call.CallID] = struct{}{}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.runningLocked() {
-		s.finishLocked(contract.Succeeded, &contract.AssistantMessage{Text: reply.Text}, reply.Usage, nil)
-	}
+	return true
+}
+
+func addUsage(previous, added uint64) uint64 {
+	return previous + min(added, ^uint64(0)-previous)
 }
 
 func sharedTextPrefix(a, b string) int {
@@ -139,7 +214,6 @@ func sharedTextPrefix(a, b string) int {
 	for i < len(a) && i < len(b) && a[i] == b[i] {
 		i++
 	}
-	// Only complete UTF-8 characters are shared between the draft and snapshot.
 	for i < len(b) && !utf8.RuneStart(b[i]) {
 		i--
 	}
