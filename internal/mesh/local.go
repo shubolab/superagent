@@ -72,6 +72,15 @@ func (l *Local) Call(ctx context.Context, req MeshRequest) (MeshReply, error) {
 		return MeshReply{Result: result}, err
 	case Cancel:
 		return MeshReply{}, runner.Cancel(ctx, subject, req.RunID)
+	case ReadContextSource:
+		reader, ok := runner.(interface {
+			ReadSource(context.Context, contract.SubjectID, contract.RunID, ContextSourceRequest) (contract.ContextSourcePage, error)
+		})
+		if !ok {
+			return MeshReply{}, contract.ErrContextSourceUnavailable
+		}
+		page, err := reader.ReadSource(ctx, subject, req.RunID, req.Source)
+		return MeshReply{SourcePage: page}, err
 	default:
 		return MeshReply{}, contract.ErrInvalidRequest
 	}

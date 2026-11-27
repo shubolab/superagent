@@ -59,6 +59,16 @@ func (r *Runner) ConfigureTools(ref contract.RunnerRef, transport mesh.MeshTrans
 		}
 		r.permissions[subject] = maps.Clone(access)
 	}
+	for model, p := range r.contextPolicies {
+		if p.Compaction == nil {
+			continue
+		}
+		binding := r.tools[p.Compaction.SourceTool]
+		if !binding.Spec.NeedsContextSource || binding.Spec.NeedsReadAccess {
+			return fmt.Errorf("%w: invalid context source tool for %q", contract.ErrInvalidConfiguration, model)
+		}
+	}
+
 	return nil
 }
 
@@ -82,6 +92,12 @@ func (r *Runner) admitTools(subject contract.SubjectID, req contract.StartReques
 		permission, allowed := r.permissions[subject][ref]
 		if !allowed {
 			return contract.ErrAccessDenied
+		}
+		if binding.Spec.NeedsContextSource {
+			policy := r.contextPolicies[req.Model].Compaction
+			if policy == nil || policy.SourceTool != ref {
+				return contract.ErrAccessDenied
+			}
 		}
 		if binding.Spec.NeedsReadAccess {
 			needsEnvironment = true
@@ -243,7 +259,11 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	})
 	s.mu.Unlock()
 
-	result := invoke(s.ctx, a.transport, e, req)
+	invokeCtx := s.ctx
+	if binding.Spec.NeedsContextSource {
+		invokeCtx = contract.WithContextSource(invokeCtx, invocationSource{state: s, call: req.CallID})
+	}
+	result := invoke(invokeCtx, a.transport, e, req)
 	var measured uint64
 	verified := e.Grant == ""
 	if e.Grant != "" {

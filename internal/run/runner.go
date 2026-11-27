@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shubolab/superagent/internal/contextview"
 	"github.com/shubolab/superagent/internal/contract"
 	"github.com/shubolab/superagent/internal/mesh"
 )
@@ -66,13 +67,19 @@ func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open 
 		}
 	}
 	for ref, policy := range cfg.ContextPolicies {
-		if _, ok := models[ref]; !ok || policy.MaxOutputTokens == 0 {
+		if _, ok := models[ref]; !ok || policy.MaxOutputTokens == 0 ||
+			(policy.Compaction != nil && !contextview.ValidPolicy(*policy.Compaction)) {
 			return nil, fmt.Errorf("%w: invalid context policy for model %q", contract.ErrInvalidConfiguration, ref)
 		}
 	}
 
+	policies := maps.Clone(cfg.ContextPolicies)
+	for ref, policy := range policies {
+		policy.Compaction = copyValue(policy.Compaction)
+		policies[ref] = policy
+	}
 	return &Runner{
-		models: models, allowed: allowed, defaults: defaults, caps: caps, open: open, contextPolicies: maps.Clone(cfg.ContextPolicies),
+		models: models, allowed: allowed, defaults: defaults, caps: caps, open: open, contextPolicies: policies,
 		observeBufferBytes: cfg.ObserveBufferBytes, retention: cfg.ResultRetention, runs: make(map[runKey]*state),
 	}, nil
 }
@@ -98,6 +105,19 @@ func (r *Runner) Start(ctx context.Context, subject contract.SubjectID, req cont
 	if err := r.admitTools(subject, req); err != nil {
 		return "", err
 	}
+	policy := r.contextPolicies[req.Model].Compaction
+	if len(req.PinnedHistory) > 0 && policy == nil {
+		return "", contract.ErrInvalidRequest
+	}
+	for _, pin := range req.PinnedHistory {
+		if pin < 0 || pin >= len(req.History) {
+			return "", contract.ErrInvalidRequest
+		}
+	}
+	if policy != nil && !slices.Contains(req.Tools, policy.SourceTool) {
+		return "", contract.ErrAccessDenied
+	}
+	req.PinnedHistory = slices.Clone(req.PinnedHistory)
 	req.History = cloneMessages(req.History)
 	req.Tools = slices.Clone(req.Tools)
 	req.Budget = cloneBudget(req.Budget)
@@ -121,6 +141,9 @@ func (r *Runner) Start(ctx context.Context, subject contract.SubjectID, req cont
 		return req.ID, nil
 	}
 	s := newState(req, budget, now.Add(budget.timeout), r.observeBufferBytes)
+	if policy != nil {
+		s.compaction = &compactionState{sources: contextview.NewStore(policy.SourcePageBytes)}
+	}
 	r.runs[key] = s
 	go r.generate(s, subject)
 	return req.ID, nil
@@ -242,6 +265,7 @@ func cloneResult(result contract.Result) contract.Result {
 	result.Messages = cloneMessages(result.Messages)
 	result.Usage = copyValue(result.Usage)
 	result.Stop = copyValue(result.Stop)
+	result.ContextCompactions = slices.Clone(result.ContextCompactions)
 	return result
 }
 
@@ -277,4 +301,12 @@ func cloneToolResult(result contract.ToolResult) contract.ToolResult {
 		result.Usage.ScannedBytes = copyValue(result.Usage.ScannedBytes)
 	}
 	return result
+}
+
+func (r *Runner) ReadSource(ctx context.Context, subject contract.SubjectID, id contract.RunID, req mesh.ContextSourceRequest) (contract.ContextSourcePage, error) {
+	s, err := r.get(subject, id)
+	if err != nil || s.compaction == nil {
+		return contract.ContextSourcePage{}, contract.ErrContextSourceUnavailable
+	}
+	return s.compaction.sources.ReadSource(ctx, req.Ref, req.Offset, req.MaxBytes)
 }

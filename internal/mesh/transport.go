@@ -32,6 +32,7 @@ const (
 	Generate
 	MeasureModelInput
 	InvalidateModelEstimate
+	ReadContextSource
 	Invoke
 	AllocateEnvironment
 	GrantEnvironment
@@ -47,6 +48,7 @@ type MeshRequest struct {
 	Start          contract.StartRequest
 	Model          contract.ModelRequest
 	ProfileVersion string
+	Source         ContextSourceRequest
 	Tool           contract.ToolRequest
 	Environment    EnvironmentRequest
 }
@@ -61,6 +63,7 @@ type MeshReply struct {
 	Scanned     uint64
 	ModelLimits contract.ModelContextLimits
 	Measurement contract.InputTokenMeasurement
+	SourcePage  contract.ContextSourcePage
 }
 
 type MeshFrame struct {
@@ -76,4 +79,10 @@ type EnvironmentRequest struct {
 	Grant  contract.EnvironmentGrantRef
 	Path   string
 	Prefix string
+}
+
+type ContextSourceRequest struct {
+	Ref      contract.ContextSourceRef
+	Offset   uint64
+	MaxBytes uint64
 }

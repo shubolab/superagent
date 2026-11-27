@@ -26,10 +26,11 @@ type ToolPermission struct {
 }
 
 type ToolSpec struct {
-	Description     string
-	InputSchema     json.RawMessage
-	NeedsReadAccess bool
-	Limits          ToolLimits
+	Description        string
+	InputSchema        json.RawMessage
+	NeedsReadAccess    bool
+	NeedsContextSource bool
+	Limits             ToolLimits
 }
 
 type LocalToolBinding struct {

@@ -35,14 +35,15 @@ type RunnerConfig struct {
 }
 
 type StartRequest struct {
-	ID          RunID
-	Model       ModelRef
-	Instruction string
-	History     []Message
-	Input       UserMessage
-	Budget      Budget
-	Tools       []ToolRef
-	Environment *EnvironmentRequirement
+	ID            RunID
+	Model         ModelRef
+	Instruction   string
+	History       []Message
+	PinnedHistory []int
+	Input         UserMessage
+	Budget        Budget
+	Tools         []ToolRef
+	Environment   *EnvironmentRequirement
 }
 
 type Message struct {
@@ -193,13 +194,14 @@ type StopDetail struct {
 }
 
 type Result struct {
-	RunID    RunID
-	Outcome  RunOutcome
-	Answer   *AssistantMessage
-	Messages []Message
-	Usage    *Usage
-	Stop     *StopDetail
-	Cleanup  CleanupStatus
+	RunID              RunID
+	Outcome            RunOutcome
+	Answer             *AssistantMessage
+	Messages           []Message
+	Usage              *Usage
+	Stop               *StopDetail
+	Cleanup            CleanupStatus
+	ContextCompactions []ContextCompactionDiagnostic `json:",omitempty"`
 }
 
 var (

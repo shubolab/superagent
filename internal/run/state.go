@@ -9,12 +9,13 @@ import (
 )
 
 type state struct {
-	request  contract.StartRequest
-	budget   limits
-	deadline time.Time
-	ctx      context.Context
-	cancel   context.CancelFunc
-	done     chan struct{}
+	request    contract.StartRequest
+	budget     limits
+	deadline   time.Time
+	compaction *compactionState
+	ctx        context.Context
+	cancel     context.CancelFunc
+	done       chan struct{}
 
 	mu          sync.Mutex
 	finishedAt  time.Time
@@ -88,6 +89,9 @@ func (s *state) finishLocked(outcome contract.RunOutcome, answer *contract.Assis
 
 func (s *state) publishFinishedLocked(cleanup contract.CleanupStatus) {
 	s.result.Cleanup = cleanup
+	if s.compaction != nil {
+		s.result.ContextCompactions = s.compaction.diagnostics
+	}
 	s.finishedAt = time.Now()
 	s.events.publish(contract.Event{Kind: contract.EventRunFinished, Outcome: s.result.Outcome})
 	if s.result.Outcome != contract.TimedOut {

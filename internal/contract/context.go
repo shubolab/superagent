@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"time"
 )
 
 type ModelInputMeter interface {
@@ -52,10 +53,61 @@ type ModelContextPolicy struct {
 	MaxOutputTokens           uint64
 	SafetyMarginTokens        uint64
 	CalibratedEstimateVersion string
+	Compaction                *ContextCompactionPolicy
+}
+
+type ContextCompactionPolicy struct {
+	TriggerRatio         float64
+	TargetRatio          float64
+	KeepRecentTokens     uint64
+	SummaryMaxTokens     uint64
+	SummaryMaxBytes      uint64
+	MinSavedTokens       uint64
+	MaxCompactionsPerRun uint64
+	SourcePageBytes      uint64
+	SourceTool           ToolRef
+}
+
+type ContextCompactionDiagnostic struct {
+	Step                uint32
+	Trigger             string
+	Selection           string
+	BeforeTokens        uint64
+	AfterTokens         uint64
+	BeforeBytes         uint64
+	AfterBytes          uint64
+	HasCoverage         bool
+	FirstCoveredMessage int
+	LastCoveredMessage  int
+	SummaryInputBytes   uint64
+	SummaryOutputBytes  uint64
+	Elapsed             time.Duration
+}
+
+type ContextSourceReader interface {
+	ReadSource(context.Context, ContextSourceRef, uint64, uint64) (ContextSourcePage, error)
+}
+
+type ContextSourcePage struct {
+	Content    []byte
+	NextOffset uint64
+	EOF        bool
+}
+
+type contextSourceKey struct{}
+
+func WithContextSource(ctx context.Context, reader ContextSourceReader) context.Context {
+	return context.WithValue(ctx, contextSourceKey{}, reader)
+}
+
+func ContextSource(ctx context.Context) ContextSourceReader {
+	reader, _ := ctx.Value(contextSourceKey{}).(ContextSourceReader)
+	return reader
 }
 
 var (
 	ErrContextMeasurementUnavailable = errors.New("context_measurement_unavailable")
+	ErrContextSourceUnavailable      = errors.New("context_source_unavailable")
 	ErrContextInputChanged           = errors.New("context_input_changed")
 	ErrModelContextOverflow          = errors.New("model_context_overflow")
 )

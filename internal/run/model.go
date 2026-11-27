@@ -45,13 +45,9 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 			Messages: append(cloneMessages(s.request.History), cloneMessages(committed)...),
 			Tools:    r.modelTools(s.request.Tools), MaxOutputBytes: balance.output,
 		}
-		input, fits := inputSize(req, balance.modelInput)
 		switch {
 		case balance.modelRequests == 0 || step == 0:
 			s.failModel(contract.BudgetExceeded, contract.StopModelRequestLimit, s.budget.modelRequests)
-			return
-		case !fits:
-			s.failModel(contract.BudgetExceeded, contract.StopModelInputLimit, s.budget.modelInput)
 			return
 		case balance.output == 0:
 			s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
@@ -59,17 +55,39 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 		}
 		policy, metered := r.contextPolicies[req.Model]
 		var measured modelInput
-		if metered {
-			req.Context = &contract.ModelContextOptions{MaxOutputTokens: policy.MaxOutputTokens}
-			var err error
-			measured, err = r.measureInput(s, subject, &req, policy)
-			if err != nil {
-				s.failModel(contract.Failed, contract.StopContextMeasurementUnavailable, 0)
+		var input uint64
+		if s.compaction != nil {
+			checked, ok := r.prepareCompaction(s, subject, req, policy, &balance)
+			if !ok {
+				if errors.Is(checked.err, errMessageVersionChanged) {
+					s.mu.Lock()
+					step = s.step
+					s.mu.Unlock()
+					continue
+				}
 				return
 			}
-			if measured.measurement.Tokens > measured.limit {
-				s.failWindow(measured.limit)
+			req, input, measured = checked.req, checked.bytes, checked.input
+			step = req.Step
+		} else {
+			var fits bool
+			input, fits = inputSize(req, balance.modelInput)
+			if !fits {
+				s.failModel(contract.BudgetExceeded, contract.StopModelInputLimit, s.budget.modelInput)
 				return
+			}
+			if metered {
+				req.Context = &contract.ModelContextOptions{MaxOutputTokens: policy.MaxOutputTokens}
+				var err error
+				measured, err = r.measureInput(s, subject, &req, policy)
+				if err != nil {
+					s.failModel(contract.Failed, contract.StopContextMeasurementUnavailable, 0)
+					return
+				}
+				if measured.measurement.Tokens > measured.limit {
+					s.failWindow(measured.limit)
+					return
+				}
 			}
 		}
 		balance.modelRequests--
@@ -87,13 +105,7 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 			s.mu.Unlock()
 			return
 		}
-		if reply.Usage != nil {
-			if s.usage == nil {
-				s.usage = &contract.Usage{}
-			}
-			s.usage.InputTokens = addUsage(s.usage.InputTokens, reply.Usage.InputTokens)
-			s.usage.OutputTokens = addUsage(s.usage.OutputTokens, reply.Usage.OutputTokens)
-		}
+		s.addUsageLocked(reply.Usage)
 		assistant := &contract.AssistantMessage{Text: reply.Text, ToolCalls: cloneCalls(reply.ToolCalls)}
 		if reply.Finish == contract.ModelFinishStop {
 			s.finishLocked(contract.Succeeded, assistant, s.usage, nil)
@@ -117,6 +129,9 @@ func (r *Runner) modelReply(s *state, subject contract.SubjectID, req contract.M
 	if s.ctx.Err() != nil {
 		s.failModel(contract.Failed, contract.StopModelFailure, 0)
 		return nil, 0
+	}
+	if s.compaction != nil {
+		req = measurementSnapshot(req)
 	}
 	stream, err := r.open(s.ctx, subject, req)
 	if err != nil || stream == nil {
@@ -246,6 +261,17 @@ func validCalls(calls []contract.ModelToolCall, prior map[contract.CallID]struct
 		seen[call.CallID] = struct{}{}
 	}
 	return true
+}
+
+func (s *state) addUsageLocked(usage *contract.Usage) {
+	if usage == nil {
+		return
+	}
+	if s.usage == nil {
+		s.usage = &contract.Usage{}
+	}
+	s.usage.InputTokens = addUsage(s.usage.InputTokens, usage.InputTokens)
+	s.usage.OutputTokens = addUsage(s.usage.OutputTokens, usage.OutputTokens)
 }
 
 func addUsage(previous, added uint64) uint64 {
