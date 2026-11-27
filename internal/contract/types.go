@@ -194,6 +194,7 @@ var (
 	ErrBindingNotFound        = errors.New("binding not found")
 	ErrAccessDenied           = errors.New("access denied")
 	ErrInvalidRequest         = errors.New("invalid request")
+	ErrStartOutcomeUnknown    = errors.New("run start outcome unknown")
 	ErrStartConflict          = errors.New("start request conflicts with an existing run")
 	ErrRunNotFound            = errors.New("run not found")
 	ErrObservationAlreadyUsed = errors.New("run observation already used")

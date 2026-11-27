@@ -2,6 +2,7 @@ package superagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -77,6 +78,9 @@ func NewClient(m *Mesh, runner RunnerRef) (*Client, error) {
 // Start waits for admission before returning a handle to the independent Run.
 func (c *Client) Start(ctx context.Context, req StartRequest) (*Run, error) {
 	reply, err := c.transport.Call(ctx, mesh.MeshRequest{Operation: mesh.Start, Runner: c.runner, Start: req})
+	if errors.Is(err, mesh.ErrResponseLost) {
+		return nil, ErrStartOutcomeUnknown
+	}
 	if err != nil {
 		return nil, err
 	}

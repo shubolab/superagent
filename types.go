@@ -111,6 +111,7 @@ var (
 	ErrBindingNotFound        = contract.ErrBindingNotFound
 	ErrAccessDenied           = contract.ErrAccessDenied
 	ErrInvalidRequest         = contract.ErrInvalidRequest
+	ErrStartOutcomeUnknown    = contract.ErrStartOutcomeUnknown
 	ErrStartConflict          = contract.ErrStartConflict
 	ErrRunNotFound            = contract.ErrRunNotFound
 	ErrObservationAlreadyUsed = contract.ErrObservationAlreadyUsed

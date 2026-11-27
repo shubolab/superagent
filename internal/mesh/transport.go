@@ -3,10 +3,14 @@ package mesh
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/shubolab/superagent/internal/contract"
 )
+
+// ErrResponseLost indicates that a dispatched operation may have taken effect.
+var ErrResponseLost = errors.New("mesh response lost")
 
 type MeshTransport interface {
 	Call(ctx context.Context, req MeshRequest) (MeshReply, error)
