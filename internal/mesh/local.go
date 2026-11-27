@@ -68,6 +68,15 @@ func (l *Local) Call(ctx context.Context, req MeshRequest) (MeshReply, error) {
 	case Start:
 		id, err := runner.Start(ctx, subject, req.Start)
 		return MeshReply{RunID: id}, err
+	case Recover:
+		recoverer, ok := runner.(interface {
+			Recover(context.Context, contract.SubjectID, contract.RunID) (contract.RunID, error)
+		})
+		if !ok {
+			return MeshReply{}, contract.ErrRecoveryUnavailable
+		}
+		id, err := recoverer.Recover(ctx, subject, req.RunID)
+		return MeshReply{RunID: id}, err
 	case Wait:
 		result, err := runner.Wait(ctx, subject, req.RunID)
 		return MeshReply{Result: result}, err

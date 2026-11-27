@@ -56,6 +56,9 @@ func NewMesh(cfg MeshConfig) (*Mesh, error) {
 	}
 	for ref, config := range cfg.LocalRunners {
 		runner := runners[ref].(*run.Runner)
+		if retained, ok := cfg.LocalArtifacts.(contract.RetainedArtifactStore); ok {
+			runner.SetRetainedArtifacts(retained.RetainsAcrossRestart())
+		}
 		if err := runner.ConfigureTools(ref, local, config, cfg.LocalTools, cfg.LocalEnvironments, cfg.LocalArtifacts != nil); err != nil {
 			return nil, fmt.Errorf("runner %q: %w", ref, err)
 		}
@@ -85,6 +88,15 @@ func (c *Client) Start(ctx context.Context, req StartRequest) (*Run, error) {
 	if errors.Is(err, mesh.ErrResponseLost) {
 		return nil, ErrStartOutcomeUnknown
 	}
+	if err != nil {
+		return nil, err
+	}
+	return c.Run(reply.RunID), nil
+}
+
+// Recover resumes a previously admitted recoverable Run on this local runner.
+func (c *Client) Recover(ctx context.Context, id RunID) (*Run, error) {
+	reply, err := c.transport.Call(ctx, mesh.MeshRequest{Operation: mesh.Recover, Runner: c.runner, RunID: id})
 	if err != nil {
 		return nil, err
 	}

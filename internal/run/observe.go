@@ -134,6 +134,8 @@ func (o *observer) next() (contract.Event, error, <-chan struct{}) {
 	case o.ctx.Err() != nil:
 		s.events.abandon()
 		return contract.Event{}, o.ctx.Err(), nil
+	case s.checkpointErr != nil:
+		return contract.Event{}, s.checkpointErr, nil
 	case len(s.events.queue) > 0:
 		return s.events.pop(), nil, nil
 	case s.events.overflow:

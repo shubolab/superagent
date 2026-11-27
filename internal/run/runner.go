@@ -4,6 +4,7 @@ package run
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/shubolab/superagent/internal/contextview"
 	"github.com/shubolab/superagent/internal/contract"
+	"github.com/shubolab/superagent/internal/durable"
 	"github.com/shubolab/superagent/internal/mesh"
 )
 
@@ -38,6 +40,8 @@ type Runner struct {
 	permissions        map[contract.SubjectID]map[contract.ToolRef]contract.ToolPermission
 	defaultEnvironment contract.EnvironmentRef
 	contextPolicies    map[contract.ModelRef]contract.ModelContextPolicy
+	recovery           *contract.RecoveryConfig
+	retainsArtifacts   bool
 
 	mu   sync.Mutex
 	runs map[runKey]*state
@@ -46,8 +50,8 @@ type Runner struct {
 func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open OpenModel) (*Runner, error) {
 	defaults, defaultsOK := configuredBudget(cfg.DefaultBudget)
 	caps, capsOK := configuredBudget(cfg.BudgetCaps)
-	if !defaultsOK || !capsOK || defaults.timeout > caps.timeout || defaults.modelRequests > caps.modelRequests ||
-		defaults.modelInput > caps.modelInput || defaults.output > caps.output || defaults.toolRequests > caps.toolRequests || defaults.scan > caps.scan || defaults.raw > caps.raw {
+	if !defaultsOK || !capsOK || defaults.Timeout > caps.Timeout || defaults.ModelRequests > caps.ModelRequests ||
+		defaults.ModelInput > caps.ModelInput || defaults.Output > caps.Output || defaults.ToolRequests > caps.ToolRequests || defaults.Scan > caps.Scan || defaults.Raw > caps.Raw {
 		return nil, fmt.Errorf("%w: invalid default budget or caps", contract.ErrInvalidConfiguration)
 	}
 	if cfg.ObserveBufferBytes == 0 || cfg.ResultRetention <= 0 || open == nil {
@@ -78,8 +82,17 @@ func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open 
 		policy.Compaction = copyValue(policy.Compaction)
 		policies[ref] = policy
 	}
+	if cfg.Recovery != nil {
+		if !durable.Supported || cfg.Recovery.BindingVersion == "" || cfg.Recovery.ReconcileTimeout <= 0 {
+			return nil, fmt.Errorf("%w: invalid recovery configuration", contract.ErrInvalidConfiguration)
+		}
+		if err := durable.Directory(cfg.Recovery.Directory); err != nil {
+			return nil, fmt.Errorf("%w: recovery directory: %v", contract.ErrInvalidConfiguration, err)
+		}
+	}
 	return &Runner{
-		models: models, allowed: allowed, defaults: defaults, caps: caps, open: open, contextPolicies: policies,
+		recovery: copyValue(cfg.Recovery),
+		models:   models, allowed: allowed, defaults: defaults, caps: caps, open: open, contextPolicies: policies,
 		observeBufferBytes: cfg.ObserveBufferBytes, retention: cfg.ResultRetention, runs: make(map[runKey]*state),
 	}, nil
 }
@@ -135,12 +148,27 @@ func (r *Runner) Start(ctx context.Context, subject contract.SubjectID, req cont
 		return "", err
 	}
 	if existing, ok := r.runs[key]; ok {
+		if req.Recoverable && existing.request.Recoverable {
+			return r.startRecoverable(ctx, subject, req, budget, now)
+		}
 		if !reflect.DeepEqual(existing.request, req) {
 			return "", contract.ErrStartConflict
 		}
 		return req.ID, nil
 	}
-	s := newState(req, budget, now.Add(budget.timeout), r.observeBufferBytes)
+	if req.Recoverable {
+		return r.startRecoverable(ctx, subject, req, budget, now)
+	}
+	if r.recovery != nil {
+		path, identity := r.recoveryPath(subject, req.ID)
+		if _, err := readCheckpoint(path, identity); !errors.Is(err, contract.ErrRunNotFound) {
+			if err != nil {
+				return "", err
+			}
+			return "", contract.ErrStartConflict
+		}
+	}
+	s := newState(req, budget, now.Add(budget.Timeout), r.observeBufferBytes)
 	if policy != nil {
 		s.compaction = &compactionState{sources: contextview.NewStore(policy.SourcePageBytes)}
 	}
@@ -169,6 +197,9 @@ func (r *Runner) Observe(ctx context.Context, subject contract.SubjectID, id con
 	if err != nil {
 		return nil, err
 	}
+	if s.checkpoint != nil && s.checkpoint.resumed {
+		return nil, contract.ErrRecoveryObservation
+	}
 	return s.observe(ctx)
 }
 
@@ -184,6 +215,9 @@ func (r *Runner) Wait(ctx context.Context, subject contract.SubjectID, id contra
 	case <-ctx.Done():
 		return contract.Result{}, ctx.Err()
 	case <-s.done:
+		if s.checkpointErr != nil {
+			return contract.Result{}, s.checkpointErr
+		}
 		return cloneResult(s.result), nil
 	}
 }
@@ -201,7 +235,7 @@ func (r *Runner) Cancel(ctx context.Context, subject contract.SubjectID, id cont
 	if s.runningLocked() {
 		s.stopLocked(contract.Cancelled, contract.StopCancelled)
 	}
-	return nil
+	return s.checkpointErr
 }
 
 func validHistory(history []contract.Message) bool {

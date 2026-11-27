@@ -4,6 +4,12 @@ package superagent
 import "github.com/shubolab/superagent/internal/contract"
 
 type (
+	RecoveryConfig              = contract.RecoveryConfig
+	RecoveryWorkspace           = contract.RecoveryWorkspace
+	RetainedArtifactStore       = contract.RetainedArtifactStore
+	ReceiptKey                  = contract.ReceiptKey
+	ToolReceipt                 = contract.ToolReceipt
+	ReceiptProvider             = contract.ReceiptProvider
 	ArtifactRef                 = contract.ArtifactRef
 	ArtifactPage                = contract.ArtifactPage
 	ArtifactCall                = contract.ArtifactCall
@@ -82,6 +88,9 @@ type (
 )
 
 const (
+	StopModelInterrupted              = contract.StopModelInterrupted
+	StopReconcileDeadline             = contract.StopReconcileDeadline
+	StopWorkspaceUnavailable          = contract.StopWorkspaceUnavailable
 	ArtifactMaxBlockBytes             = contract.ArtifactMaxBlockBytes
 	StopToolRawOutputLimit            = contract.StopToolRawOutputLimit
 	CapabilityEnforced                = contract.CapabilityEnforced
@@ -141,6 +150,11 @@ const (
 )
 
 var (
+	ErrRecoveryUnavailable           = contract.ErrRecoveryUnavailable
+	ErrRecoveryBusy                  = contract.ErrRecoveryBusy
+	ErrRecoveryStorage               = contract.ErrRecoveryStorage
+	ErrRecoveryBinding               = contract.ErrRecoveryBinding
+	ErrRecoveryObservation           = contract.ErrRecoveryObservation
 	ErrArtifactUnavailable           = contract.ErrArtifactUnavailable
 	ErrArtifactCapacity              = contract.ErrArtifactCapacity
 	ErrArtifactOutputLimit           = contract.ErrArtifactOutputLimit

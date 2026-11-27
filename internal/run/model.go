@@ -25,13 +25,39 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 	if len(s.request.Tools) != 0 {
 		defer env.finish(s)
 	}
+	balance := s.budget
+	firstStep := uint32(1)
+	var pending *contract.AssistantMessage
+	if d := s.checkpoint; d != nil && d.resumed {
+		s.mu.Lock()
+		balance, firstStep, pending = d.data.Balance, d.data.Step, d.data.Pending
+		s.mu.Unlock()
+		if !r.resumePosition(s, env, &balance) {
+			return
+		}
+	}
 	if !env.allocate(s) {
 		return
 	}
 
-	balance := s.budget
 	committedIDs := make(map[contract.CallID]struct{})
-	for step := uint32(1); ; step++ {
+	for _, message := range s.messages {
+		if message.Assistant != nil {
+			for _, call := range message.Assistant.ToolCalls {
+				committedIDs[call.CallID] = struct{}{}
+			}
+		}
+	}
+	if pending != nil {
+		for _, call := range pending.ToolCalls {
+			committedIDs[call.CallID] = struct{}{}
+		}
+		if !r.toolBatch(s, env, &balance, pending) {
+			return
+		}
+		firstStep++
+	}
+	for step := firstStep; ; step++ {
 		s.mu.Lock()
 		if !s.runningLocked() {
 			s.mu.Unlock()
@@ -43,14 +69,14 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 		req := contract.ModelRequest{
 			RunID: s.request.ID, Step: step, Model: s.request.Model, Instruction: s.request.Instruction,
 			Messages: append(cloneMessages(s.request.History), cloneMessages(committed)...),
-			Tools:    r.modelTools(s.request.Tools), MaxOutputBytes: balance.output,
+			Tools:    r.modelTools(s.request.Tools), MaxOutputBytes: balance.Output,
 		}
 		switch {
-		case balance.modelRequests == 0 || step == 0:
-			s.failModel(contract.BudgetExceeded, contract.StopModelRequestLimit, s.budget.modelRequests)
+		case balance.ModelRequests == 0 || step == 0:
+			s.failModel(contract.BudgetExceeded, contract.StopModelRequestLimit, s.budget.ModelRequests)
 			return
-		case balance.output == 0:
-			s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
+		case balance.Output == 0:
+			s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.Output)
 			return
 		}
 		policy, metered := r.contextPolicies[req.Model]
@@ -71,9 +97,9 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 			step = req.Step
 		} else {
 			var fits bool
-			input, fits = inputSize(req, balance.modelInput)
+			input, fits = inputSize(req, balance.ModelInput)
 			if !fits {
-				s.failModel(contract.BudgetExceeded, contract.StopModelInputLimit, s.budget.modelInput)
+				s.failModel(contract.BudgetExceeded, contract.StopModelInputLimit, s.budget.ModelInput)
 				return
 			}
 			if metered {
@@ -90,13 +116,16 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 				}
 			}
 		}
-		balance.modelRequests--
-		balance.modelInput -= input
+		balance.ModelRequests--
+		balance.ModelInput -= input
+		if !s.recordModelIntent(step, balance) {
+			return
+		}
 		reply, output := r.modelReply(s, subject, req, committedIDs)
 		if reply == nil {
 			return
 		}
-		balance.output -= output
+		balance.Output -= output
 		if metered {
 			r.recordEstimate(subject, req.Model, measured.measurement, reply.Usage, policy.SafetyMarginTokens)
 		}
@@ -107,6 +136,16 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 		}
 		s.addUsageLocked(reply.Usage)
 		assistant := &contract.AssistantMessage{Text: reply.Text, ToolCalls: cloneCalls(reply.ToolCalls)}
+		if d := s.checkpoint; d != nil {
+			d.data.ModelInFlight, d.data.Balance = false, balance
+			if reply.Finish == contract.ModelFinishToolCalls {
+				d.data.Pending = assistant
+				if !s.saveLocked() {
+					s.mu.Unlock()
+					return
+				}
+			}
+		}
 		if reply.Finish == contract.ModelFinishStop {
 			s.finishLocked(contract.Succeeded, assistant, s.usage, nil)
 			s.mu.Unlock()
@@ -160,7 +199,7 @@ func (r *Runner) modelReply(s *state, subject contract.SubjectID, req contract.M
 				return nil, 0
 			}
 			if uint64(draft.Len())+uint64(len(event.TextDelta)) > req.MaxOutputBytes {
-				s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
+				s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.Output)
 				return nil, 0
 			}
 			s.mu.Lock()
@@ -200,7 +239,7 @@ func (s *state) failAdapter(err error) {
 	case errors.Is(err, contract.ErrModelResponseProtocol):
 		code = contract.StopModelProtocol
 	case errors.Is(err, contract.ErrModelOutputLimit):
-		s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
+		s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.Output)
 		return
 	default:
 		code = contract.StopModelFailure
@@ -229,13 +268,13 @@ func (s *state) acceptModel(req contract.ModelRequest, draft string, event contr
 	for _, call := range reply.ToolCalls {
 		bytes := uint64(len(call.CallID)) + uint64(len(call.Tool)) + uint64(len(call.Arguments))
 		if output > req.MaxOutputBytes || bytes > req.MaxOutputBytes-output {
-			s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
+			s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.Output)
 			return nil, 0
 		}
 		output += bytes
 	}
 	if output > req.MaxOutputBytes {
-		s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
+		s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.Output)
 		return nil, 0
 	}
 	if !validCalls(reply.ToolCalls, used) {

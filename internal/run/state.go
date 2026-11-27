@@ -9,13 +9,15 @@ import (
 )
 
 type state struct {
-	request    contract.StartRequest
-	budget     limits
-	deadline   time.Time
-	compaction *compactionState
-	ctx        context.Context
-	cancel     context.CancelFunc
-	done       chan struct{}
+	request       contract.StartRequest
+	budget        limits
+	deadline      time.Time
+	compaction    *compactionState
+	checkpoint    *runCheckpoint
+	checkpointErr error
+	ctx           context.Context
+	cancel        context.CancelFunc
+	done          chan struct{}
 
 	mu          sync.Mutex
 	finishedAt  time.Time
@@ -48,7 +50,7 @@ func (s *state) expired(now time.Time, retention time.Duration) bool {
 }
 
 func (s *state) runningLocked() bool {
-	if s.result.Outcome != "" || s.stop != nil {
+	if s.result.Outcome != "" || s.stop != nil || s.checkpointErr != nil {
 		return false
 	}
 	if !time.Now().Before(s.deadline) {
@@ -61,6 +63,9 @@ func (s *state) runningLocked() bool {
 func (s *state) stopLocked(outcome contract.RunOutcome, code contract.StopCode) {
 	s.stopOutcome = outcome
 	s.stop = &contract.StopDetail{Code: code, Step: s.step, CallID: s.activeCall}
+	if !s.saveLocked() {
+		return
+	}
 	if outcome != contract.TimedOut {
 		s.cancel()
 	}
@@ -88,11 +93,22 @@ func (s *state) finishLocked(outcome contract.RunOutcome, answer *contract.Assis
 }
 
 func (s *state) publishFinishedLocked(cleanup contract.CleanupStatus) {
+	if s.checkpointErr != nil {
+		return
+	}
 	s.result.Cleanup = cleanup
 	if s.compaction != nil {
 		s.result.ContextCompactions = s.compaction.diagnostics
 	}
-	s.finishedAt = time.Now()
+	now := time.Now()
+	if d := s.checkpoint; d != nil {
+		d.data.Result, d.data.FinishedAt = &s.result, now
+		if !s.saveLocked() {
+			return
+		}
+		_ = d.lock.Close()
+	}
+	s.finishedAt = now
 	s.events.publish(contract.Event{Kind: contract.EventRunFinished, Outcome: s.result.Outcome})
 	if s.result.Outcome != contract.TimedOut {
 		s.cancel()

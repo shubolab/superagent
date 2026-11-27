@@ -53,7 +53,7 @@ func (c checkedView) fits() bool {
 }
 
 func (r *Runner) checkView(s *state, subject contract.SubjectID, req contract.ModelRequest, p contract.ModelContextPolicy, balance limits) checkedView {
-	n, fits := inputSize(req, balance.modelInput)
+	n, fits := inputSize(req, balance.ModelInput)
 	input, err := r.measureInput(s, subject, &req, p)
 	return checkedView{req: req, input: input, bytes: n, bytesFit: fits, err: err}
 }
@@ -135,14 +135,14 @@ func (r *Runner) prepareCompaction(s *state, subject contract.SubjectID, req con
 		}
 
 		if c.attempts < policy.MaxCompactionsPerRun && c.lastAttemptVersion != version &&
-			balance.modelRequests > 1 && balance.output > policy.SummaryMaxBytes && req.Step < ^uint32(0) {
+			balance.ModelRequests > 1 && balance.Output > policy.SummaryMaxBytes && req.Step < ^uint32(0) {
 			if plan, ok := r.planSummary(s, subject, req, p, *balance, blocks, best, target, current.input.limit); ok {
 				c.lastAttemptVersion = version
 				c.attempts++
-				beforeOutput := balance.output
+				beforeOutput := balance.Output
 				generated := r.generateSummary(s, subject, plan.checked, p, balance)
 				trace.SummaryInputBytes = plan.checked.bytes
-				trace.SummaryOutputBytes = beforeOutput - balance.output
+				trace.SummaryOutputBytes = beforeOutput - balance.Output
 				if s.ctx.Err() != nil {
 					s.mu.Lock()
 					s.runningLocked()
@@ -150,7 +150,7 @@ func (r *Runner) prepareCompaction(s *state, subject contract.SubjectID, req con
 					return checkedView{}, false
 				}
 				req.Step++
-				req.MaxOutputBytes = balance.output
+				req.MaxOutputBytes = balance.Output
 				s.mu.Lock()
 				s.step = req.Step
 				s.mu.Unlock()
@@ -285,7 +285,7 @@ func (r *Runner) stopForViews(s *state, views ...checkedView) (checkedView, bool
 	if window > 0 {
 		s.failWindow(window)
 	} else {
-		s.failModel(contract.BudgetExceeded, contract.StopModelInputLimit, s.budget.modelInput)
+		s.failModel(contract.BudgetExceeded, contract.StopModelInputLimit, s.budget.ModelInput)
 	}
 	return checkedView{}, false
 }
@@ -338,7 +338,7 @@ func (r *Runner) planSummary(s *state, subject contract.SubjectID, req contract.
 			}
 			continue
 		}
-		remaining := balance.modelInput - checked.bytes
+		remaining := balance.ModelInput - checked.bytes
 		const summaryField = uint64(len(`,"Summary":[]`))
 		// JSON re-encoding can expand a decoded character to a six-byte escape.
 		if expected.bytes >= remaining || remaining-expected.bytes < summaryField ||
@@ -364,10 +364,10 @@ func (r *Runner) generateSummary(s *state, subject contract.SubjectID, checked c
 	if s.ctx.Err() != nil {
 		return nil
 	}
-	balance.modelRequests--
-	balance.modelInput -= checked.bytes
+	balance.ModelRequests--
+	balance.ModelInput -= checked.bytes
 	text, used, usage := r.readSummary(s, subject, checked.req)
-	balance.output -= used
+	balance.Output -= used
 	r.recordEstimate(subject, checked.req.Model, checked.input.measurement, usage, policy.SafetyMarginTokens)
 	s.mu.Lock()
 	s.addUsageLocked(usage)

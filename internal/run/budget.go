@@ -8,13 +8,13 @@ import (
 )
 
 type limits struct {
-	timeout       time.Duration
-	modelRequests uint64
-	modelInput    uint64
-	output        uint64
-	toolRequests  uint64
-	scan          uint64
-	raw           uint64
+	Timeout       time.Duration
+	ModelRequests uint64
+	ModelInput    uint64
+	Output        uint64
+	ToolRequests  uint64
+	Scan          uint64
+	Raw           uint64
 }
 
 func configuredBudget(b contract.Budget) (limits, bool) {
@@ -22,23 +22,23 @@ func configuredBudget(b contract.Budget) (limits, bool) {
 		return limits{}, false
 	}
 	l := limits{
-		timeout: *b.Timeout, modelRequests: *b.MaxModelRequests, modelInput: *b.MaxModelInputBytes, output: *b.MaxOutputBytes,
-		toolRequests: valueOr(b.MaxToolRequests, 0), scan: valueOr(b.MaxToolScanBytes, 0), raw: valueOr(b.MaxToolRawOutputBytes, 0),
+		Timeout: *b.Timeout, ModelRequests: *b.MaxModelRequests, ModelInput: *b.MaxModelInputBytes, Output: *b.MaxOutputBytes,
+		ToolRequests: valueOr(b.MaxToolRequests, 0), Scan: valueOr(b.MaxToolScanBytes, 0), Raw: valueOr(b.MaxToolRawOutputBytes, 0),
 	}
-	return l, l.timeout > 0 && l.modelRequests > 0 && l.modelInput > 0 && l.output > 0
+	return l, l.Timeout > 0 && l.ModelRequests > 0 && l.ModelInput > 0 && l.Output > 0
 }
 
 func requestBudget(req contract.Budget, defaults, caps limits) (limits, bool) {
 	l := limits{
-		timeout:       min(valueOr(req.Timeout, defaults.timeout), caps.timeout),
-		modelRequests: min(valueOr(req.MaxModelRequests, defaults.modelRequests), caps.modelRequests),
-		modelInput:    min(valueOr(req.MaxModelInputBytes, defaults.modelInput), caps.modelInput),
-		output:        min(valueOr(req.MaxOutputBytes, defaults.output), caps.output),
-		toolRequests:  min(valueOr(req.MaxToolRequests, defaults.toolRequests), caps.toolRequests),
-		scan:          min(valueOr(req.MaxToolScanBytes, defaults.scan), caps.scan),
-		raw:           min(valueOr(req.MaxToolRawOutputBytes, defaults.raw), caps.raw),
+		Timeout:       min(valueOr(req.Timeout, defaults.Timeout), caps.Timeout),
+		ModelRequests: min(valueOr(req.MaxModelRequests, defaults.ModelRequests), caps.ModelRequests),
+		ModelInput:    min(valueOr(req.MaxModelInputBytes, defaults.ModelInput), caps.ModelInput),
+		Output:        min(valueOr(req.MaxOutputBytes, defaults.Output), caps.Output),
+		ToolRequests:  min(valueOr(req.MaxToolRequests, defaults.ToolRequests), caps.ToolRequests),
+		Scan:          min(valueOr(req.MaxToolScanBytes, defaults.Scan), caps.Scan),
+		Raw:           min(valueOr(req.MaxToolRawOutputBytes, defaults.Raw), caps.Raw),
 	}
-	return l, l.timeout > 0 && l.modelRequests > 0 && l.modelInput > 0 && l.output > 0
+	return l, l.Timeout > 0 && l.ModelRequests > 0 && l.ModelInput > 0 && l.Output > 0
 }
 
 func valueOr[T any](ptr *T, fallback T) T {

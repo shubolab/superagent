@@ -23,6 +23,7 @@ type Budget struct {
 }
 
 type RunnerConfig struct {
+	Recovery           *RecoveryConfig
 	AllowedModels      map[SubjectID][]ModelRef
 	ContextPolicies    map[ModelRef]ModelContextPolicy
 	AllowedTools       map[SubjectID]map[ToolRef]ToolPermission
@@ -36,6 +37,7 @@ type RunnerConfig struct {
 }
 
 type StartRequest struct {
+	Recoverable   bool
 	ID            RunID
 	Model         ModelRef
 	Instruction   string
@@ -189,6 +191,7 @@ const (
 )
 
 type StopDetail struct {
+	Trigger     StopCode `json:",omitempty"`
 	Code        StopCode
 	Step        uint32
 	LimitBytes  uint64

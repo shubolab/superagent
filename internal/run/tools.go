@@ -196,14 +196,24 @@ func (r *Runner) toolBatch(s *state, a *activity, balance *limits, assistant *co
 	for _, tool := range s.request.Tools {
 		selected[tool] = true
 	}
-	for _, call := range assistant.ToolCalls {
+	for i, call := range assistant.ToolCalls {
+		if d := s.checkpoint; d != nil && i < len(d.data.ToolResults) {
+			result := d.data.ToolResults[i]
+			pending = append(pending, contract.Message{Tool: &contract.ToolMessage{Tool: call.Tool, Result: result}})
+			continue
+		}
 		s.mu.Lock()
 		live := s.runningLocked()
 		s.mu.Unlock()
 		if !live {
 			return false
 		}
-		result, usable := r.callTool(s, a, balance, call, selected[call.Tool])
+		allowed := selected[call.Tool]
+		if s.checkpoint != nil {
+			_, currentlyAllowed := r.permissions[a.env.Run.Subject][call.Tool]
+			allowed = allowed && currentlyAllowed
+		}
+		result, usable := r.callTool(s, a, balance, call, allowed)
 		if !usable {
 			return false
 		}
@@ -215,26 +225,31 @@ func (r *Runner) toolBatch(s *state, a *activity, balance *limits, assistant *co
 		return false
 	}
 	s.messages = append(s.messages, pending...)
+	if d := s.checkpoint; d != nil {
+		d.data.Pending, d.data.ToolResults = nil, nil
+		d.data.Step, d.data.Balance = s.step+1, *balance
+		return s.saveLocked()
+	}
 	return true
 }
 
 func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.ModelToolCall, allowed bool) (contract.ToolResult, bool) {
-	if balance.toolRequests == 0 {
-		s.failTool(contract.StopToolRequestLimit, call.CallID, s.budget.toolRequests)
+	if balance.ToolRequests == 0 {
+		s.failTool(contract.StopToolRequestLimit, call.CallID, s.budget.ToolRequests)
 		return contract.ToolResult{}, false
 	}
-	balance.toolRequests--
+	balance.ToolRequests--
 	binding := r.tools[call.Tool]
 	req := contract.ToolRequest{
 		RunID: s.request.ID, CallID: call.CallID, Tool: call.Tool, Arguments: bytes.Clone(call.Arguments),
-		Limits: contract.ToolLimits{MaxResultBytes: balance.output},
+		Limits: contract.ToolLimits{MaxResultBytes: balance.Output},
 	}
 	if allowed {
-		req.Limits.MaxScanBytes = min(balance.scan, binding.Spec.Limits.MaxScanBytes)
+		req.Limits.MaxScanBytes = min(balance.Scan, binding.Spec.Limits.MaxScanBytes)
 		if binding.Spec.NeedsReadAccess && a.readCap > 0 {
 			req.Limits.MaxScanBytes = min(req.Limits.MaxScanBytes, a.readCap)
 		}
-		req.Limits.MaxResultBytes = min(balance.output, binding.Spec.Limits.MaxResultBytes)
+		req.Limits.MaxResultBytes = min(balance.Output, binding.Spec.Limits.MaxResultBytes)
 	}
 	if req.Limits.MaxResultBytes < minimumReceiptSize(req) {
 		s.failTool(contract.StopToolReceiptLimit, call.CallID, req.Limits.MaxResultBytes)
@@ -248,9 +263,9 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 		return reject("tool_not_authorized")
 	}
 	if binding.Spec.NeedsArtifactOutput {
-		req.Limits.MaxRawOutputBytes = min(balance.raw, binding.Spec.Limits.MaxRawOutputBytes)
+		req.Limits.MaxRawOutputBytes = min(balance.Raw, binding.Spec.Limits.MaxRawOutputBytes)
 		if req.Limits.MaxRawOutputBytes == 0 {
-			s.failTool(contract.StopToolRawOutputLimit, call.CallID, s.budget.raw)
+			s.failTool(contract.StopToolRawOutputLimit, call.CallID, s.budget.Raw)
 			return contract.ToolResult{}, false
 		}
 	}
@@ -264,15 +279,17 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 		e.Call.Path = file
 	}
 	if binding.Spec.NeedsReadAccess {
-		permission := r.permissions[e.Run.Subject][req.Tool]
-		if _, ok := environment.RelativeFile(permission.ReadPrefix, e.Call.Path); !ok {
+		current, original := r.recoveryPermission(s, e.Run.Subject, req.Tool)
+		_, allowedNow := environment.RelativeFile(current.ReadPrefix, e.Call.Path)
+		_, allowedBefore := environment.RelativeFile(original.ReadPrefix, e.Call.Path)
+		if !allowedNow || !allowedBefore || original.Environment != current.Environment {
 			return reject("path_not_authorized")
 		}
 		if req.Limits.MaxScanBytes == 0 {
-			s.failTool(contract.StopToolScanLimit, call.CallID, s.budget.scan)
+			s.failTool(contract.StopToolScanLimit, call.CallID, s.budget.Scan)
 			return contract.ToolResult{}, false
 		}
-		e.Prefix = permission.ReadPrefix
+		e.Prefix = current.ReadPrefix
 		grant, err := mesh.CallComponent(s.ctx, a.transport, mesh.GrantEnvironment, e, contract.ToolRequest{})
 		if errors.Is(err, contract.ErrEnvironmentBusy) {
 			return reject("environment_busy")
@@ -296,7 +313,7 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	}
 
 	s.mu.Lock()
-	if !s.runningLocked() {
+	if !s.runningLocked() || !s.recordToolIntent(e, req, *balance) {
 		s.mu.Unlock()
 		if e.Grant != "" {
 			_, _ = cleanupCall(a.transport, mesh.RevokeEnvironment, e)
@@ -312,13 +329,17 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	s.events.publish(contract.Event{
 		Kind: contract.EventToolDispatched, Step: s.step, Tool: &contract.ToolEvent{CallID: req.CallID, Tool: req.Tool},
 	})
+	var key contract.ReceiptKey
+	if d := s.checkpoint; d != nil {
+		key = d.data.Intent.Key
+	}
 	s.mu.Unlock()
 
 	invokeCtx := s.ctx
 	if binding.Spec.NeedsContextSource {
 		invokeCtx = contract.WithContextSource(invokeCtx, invocationSource{state: s, call: req.CallID})
 	}
-	result := invoke(invokeCtx, a.transport, e, req)
+	result := invoke(invokeCtx, a.transport, e, req, key)
 	var measured uint64
 	verified := e.Grant == ""
 	if e.Grant != "" {
@@ -340,6 +361,9 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 			result.Usage = &contract.ToolUsage{}
 		}
 		result.Usage.ScannedBytes = &measured
+	}
+	if key != (contract.ReceiptKey{}) && (!validToolResult(result, req.RunID, req.CallID) || toolStatus(result) == contract.ToolStatusUnknown) {
+		return r.reconcileTool(s, a, balance, toolIntent{Key: key, Limits: req.Limits})
 	}
 	return result, s.settleTool(balance, req, result, toolStatus(result), true, measured, verified, raw)
 }
@@ -379,10 +403,10 @@ type componentReply struct {
 	err   error
 }
 
-func invoke(ctx context.Context, transport mesh.MeshTransport, e mesh.EnvironmentRequest, req contract.ToolRequest) contract.ToolResult {
+func invoke(ctx context.Context, transport mesh.MeshTransport, e mesh.EnvironmentRequest, req contract.ToolRequest, key contract.ReceiptKey) contract.ToolResult {
 	results := make(chan componentReply, 1)
 	go func() {
-		reply, err := mesh.CallComponent(ctx, transport, mesh.Invoke, e, req)
+		reply, err := mesh.CallReceipt(ctx, transport, mesh.Invoke, e, req, key)
 		results <- componentReply{reply, err}
 	}()
 	var response componentReply
@@ -427,15 +451,15 @@ func (s *state) settleTool(balance *limits, req contract.ToolRequest, result con
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	live := s.runningLocked()
-	if !dispatched && !live {
+	if s.checkpointErr != nil || (!dispatched && !live) {
 		return false
 	}
 	s.activeCall = ""
 	if !verified {
 		measured = req.Limits.MaxScanBytes
 	}
-	balance.scan -= measured
-	balance.raw -= raw
+	balance.Scan -= measured
+	balance.Raw -= raw
 	var code string
 	if !validToolResult(result, req.RunID, req.CallID) {
 		status = contract.ToolStatusUnknown
@@ -445,23 +469,49 @@ func (s *state) settleTool(balance *limits, req contract.ToolRequest, result con
 	s.events.publish(contract.Event{Kind: contract.EventToolCompleted, Step: s.step,
 		Tool: &contract.ToolEvent{CallID: req.CallID, Tool: req.Tool, Status: status, Code: code}})
 	if status == contract.ToolStatusUnknown {
-		s.finishLocked(contract.ToolOutcomeUnknown, nil, s.usage, &contract.StopDetail{
-			Code: contract.StopToolUnknown, Step: s.step, CallID: req.CallID,
-		})
+		stop := &contract.StopDetail{Code: contract.StopToolUnknown, Step: s.step, CallID: req.CallID}
+		if d := s.checkpoint; d != nil {
+			balance.Output -= req.Limits.MaxResultBytes
+			d.data.Intent, d.data.Balance = nil, *balance
+			stop.Trigger = contract.StopReconcileDeadline
+			if s.stop != nil {
+				stop.Trigger = s.stop.Code
+			}
+		}
+		s.finishLocked(contract.ToolOutcomeUnknown, nil, s.usage, stop)
 		return false
 	}
-	if !live {
+	if !live && s.checkpoint == nil {
 		s.finishLocked(s.stopOutcome, nil, s.usage, s.stop)
 		return false
 	}
 	size, fits := receiptSize(result, req.Limits.MaxResultBytes)
 	if !fits {
+		if d := s.checkpoint; d != nil {
+			balance.Output -= req.Limits.MaxResultBytes
+			d.data.Intent, d.data.Balance = nil, *balance
+		}
+		if !live {
+			s.finishLocked(s.stopOutcome, nil, s.usage, s.stop)
+			return false
+		}
 		s.finishLocked(contract.BudgetExceeded, nil, s.usage, &contract.StopDetail{
 			Code: contract.StopToolReceiptLimit, Step: s.step, CallID: req.CallID, LimitBytes: req.Limits.MaxResultBytes,
 		})
 		return false
 	}
-	balance.output -= size
+	balance.Output -= size
+	if d := s.checkpoint; d != nil {
+		d.data.ToolResults = append(d.data.ToolResults, cloneToolResult(result))
+		d.data.Intent, d.data.Balance = nil, *balance
+		if !s.saveLocked() {
+			return false
+		}
+	}
+	if !live {
+		s.finishLocked(s.stopOutcome, nil, s.usage, s.stop)
+		return false
+	}
 	return true
 }
 

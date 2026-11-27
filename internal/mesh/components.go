@@ -49,6 +49,21 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 	if req.Operation == BeginArtifactOutput || req.Operation == SettleArtifactOutput {
 		return l.artifactCall(ctx, req.Operation, e)
 	}
+	if req.Operation == VerifyRetainedArtifact {
+		return l.readArtifact(ctx, e.Run.Subject, MeshRequest{Runner: e.Run.Runner, RunID: e.Run.RunID, Artifact: req.Artifact})
+	}
+	if req.Operation == QueryReceipt {
+		key := req.ReceiptKey
+		if !validReceiptRoute(key, e) || key.Tool != e.Call.Tool || key.CallID != e.Call.CallID {
+			return MeshReply{}, contract.ErrAccessDenied
+		}
+		provider, ok := l.tools[key.Tool].Tool.(contract.ReceiptProvider)
+		if !ok {
+			return MeshReply{}, contract.ErrRecoveryUnavailable
+		}
+		receipt, err := provider.QueryReceipt(ctx, key)
+		return MeshReply{Receipt: receipt}, err
+	}
 	if req.Operation == Invoke {
 		binding, ok := l.tools[req.Tool.Tool]
 		if !ok {
@@ -81,6 +96,12 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		if binding.Spec.NeedsArtifactOutput {
 			toolCtx = l.withArtifactOutput(toolCtx, e, req.Tool)
 		}
+		if key := req.ReceiptKey; key != (contract.ReceiptKey{}) {
+			if !validReceiptRoute(key, e) || key.Tool != req.Tool.Tool || key.CallID != req.Tool.CallID {
+				return MeshReply{}, errors.Join(contract.ErrNotDelivered, contract.ErrAccessDenied)
+			}
+			toolCtx = contract.WithReceiptKey(toolCtx, key)
+		}
 		result, err := binding.Tool.Invoke(toolCtx, req.Tool)
 		if err != nil {
 			// Delivery already happened. An error from the tool is not Mesh delivery evidence.
@@ -100,6 +121,13 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 	scope.Limits.MaxRawOutputBytes = 0
 
 	switch req.Operation {
+	case VerifyRecoveryWorkspace:
+		verifier, ok := env.(contract.RecoveryWorkspace)
+		if !ok {
+			return MeshReply{}, contract.ErrRecoveryUnavailable
+		}
+		version, err := verifier.RecoveryWorkspace(ctx, e.Run)
+		return MeshReply{WorkspaceVersion: version}, err
 	case DescribeEnvironmentRead:
 		descriptor, ok := env.(contract.EnvironmentReadDescriptor)
 		if !ok {
@@ -127,6 +155,26 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 }
 
 func CallComponent(ctx context.Context, transport MeshTransport, op Operation, env EnvironmentRequest, tool contract.ToolRequest) (MeshReply, error) {
-	ctx = context.WithValue(ctx, componentKey{}, componentIdentity{run: env.Run, call: env.Call, ref: env.Ref})
-	return transport.Call(ctx, MeshRequest{Operation: op, Environment: env, Tool: tool})
+	return callComponent(ctx, transport, MeshRequest{Operation: op, Environment: env, Tool: tool})
+}
+
+func CallReceipt(ctx context.Context, transport MeshTransport, op Operation, env EnvironmentRequest, tool contract.ToolRequest, key contract.ReceiptKey) (MeshReply, error) {
+	return callComponent(ctx, transport, MeshRequest{Operation: op, Environment: env, Tool: tool, ReceiptKey: key})
+}
+
+func CheckRetainedArtifact(ctx context.Context, transport MeshTransport, env EnvironmentRequest, ref contract.ArtifactRef) error {
+	_, err := callComponent(ctx, transport, MeshRequest{Operation: VerifyRetainedArtifact, Environment: env, Artifact: ArtifactRead{Ref: ref, MaxBytes: 1}})
+	return err
+}
+
+func callComponent(ctx context.Context, transport MeshTransport, req MeshRequest) (MeshReply, error) {
+	e := req.Environment
+	ctx = context.WithValue(ctx, componentKey{}, componentIdentity{run: e.Run, call: e.Call, ref: e.Ref})
+	return transport.Call(ctx, req)
+}
+
+func validReceiptRoute(key contract.ReceiptKey, e EnvironmentRequest) bool {
+	return key.Runner == e.Run.Runner && key.Subject == e.Run.Subject && key.RunID == e.Run.RunID &&
+		key.Step != 0 && key.Environment == e.Ref && key.Workspace == e.Run.Workspace &&
+		key.BindingVersion != "" && key.Fingerprint != ""
 }

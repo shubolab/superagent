@@ -34,6 +34,7 @@ const (
 	InvalidateModelEstimate
 	ReadContextSource
 	ReadArtifact
+	Recover
 	Invoke
 	BeginArtifactOutput
 	SettleArtifactOutput
@@ -43,6 +44,9 @@ const (
 	OpenEnvironmentRead
 	RevokeEnvironment
 	ReleaseEnvironment
+	QueryReceipt
+	VerifyRecoveryWorkspace
+	VerifyRetainedArtifact
 )
 
 type MeshRequest struct {
@@ -55,6 +59,7 @@ type MeshRequest struct {
 	Source         ContextSourceRequest
 	Artifact       ArtifactRead
 	Tool           contract.ToolRequest
+	ReceiptKey     contract.ReceiptKey
 	Environment    EnvironmentRequest
 }
 
@@ -71,6 +76,8 @@ type MeshReply struct {
 	SourcePage       contract.ContextSourcePage
 	ReadCapabilities *contract.EnvironmentReadCapabilities
 	RawOutputBytes   uint64
+	Receipt          *contract.ToolReceipt
+	WorkspaceVersion string
 	ArtifactPage     contract.ArtifactPage
 }
 
