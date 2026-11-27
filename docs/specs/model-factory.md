@@ -10,6 +10,7 @@ type ProviderRef string
 type ModelFactoryConfig struct {
     Providers map[ProviderRef]ProviderConfig
     Models    map[ModelRef]ModelBindingConfig
+    Adapters  map[string]ModelAdapter
 }
 
 type ProviderConfig struct {
@@ -39,6 +40,8 @@ func (b *ModelBindings) Close(ctx context.Context) error
 | `MeshConfig.LocalModels` | 宿主取 `bindings.LocalModels()` 登记已经装配好的模型。方法返回登记表副本，客户端仍由原装配持有 |
 
 例如，宿主配置供应商连接 `primary`，使用已支持的适配器和凭据引用 `models/primary`。它把 `chat` 和 `chat-fast` 绑定到 `primary` 下的两个供应商模型。两者共用客户端，`StartRequest.Model` 只填逻辑名，例如 `chat`。运行器在 `Start` 校验可见性和授权，固定本次 Run 的模型绑定。适配器按绑定上的 `ModelID` 发出请求。 [Run 模型授权](run-authorization.md#宿主授予-run)
+
+每种 `ModelAdapter` 提供 `Open` 构造一个支持并发的 `ModelAdapterClient`。客户端以独立调用上下文和绑定的 `ModelID` 接收 `Generate`。
 
 Go 宿主可以直接登记自有 `ModelProvider`，并管理它的生命周期。文件装配同样可将已建成的适配器登记为本地实现名，由 Mesh YAML 的 `models.<ref>.local` 引用。 [Mesh 本地配置](mesh-transport.md#本地配置格式)
 

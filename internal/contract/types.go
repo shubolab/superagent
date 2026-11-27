@@ -160,6 +160,8 @@ type StopCode string
 const (
 	StopCancelled          StopCode = "run_cancelled"
 	StopDeadline           StopCode = "run_deadline"
+	StopModelAuthFailed    StopCode = "model_auth_failed"
+	StopModelNotFound      StopCode = "model_not_found"
 	StopModelFailure       StopCode = "model_request_failed"
 	StopModelTruncated     StopCode = "model_truncated"
 	StopModelProtocol      StopCode = "model_protocol_error"
@@ -192,6 +194,11 @@ type Result struct {
 
 var (
 	ErrInvalidConfiguration   = errors.New("invalid configuration")
+	ErrModelAuthFailed        = errors.New("model_auth_failed")
+	ErrModelNotFound          = errors.New("model_not_found")
+	ErrModelResponseTruncated = errors.New("model_truncated")
+	ErrModelResponseProtocol  = errors.New("model_protocol_error")
+	ErrModelOutputLimit       = errors.New("model_output_limit")
 	ErrBindingNotFound        = errors.New("binding not found")
 	ErrAccessDenied           = errors.New("access denied")
 	ErrInvalidRequest         = errors.New("invalid request")

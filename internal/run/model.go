@@ -102,7 +102,7 @@ func (r *Runner) modelReply(s *state, subject contract.SubjectID, req contract.M
 	}
 	stream, err := r.open(s.ctx, subject, req)
 	if err != nil || stream == nil {
-		s.failModel(contract.Failed, contract.StopModelFailure, 0)
+		s.failAdapter(err)
 		return nil, 0
 	}
 	closeStream := sync.OnceFunc(func() { _ = stream.Close() })
@@ -114,11 +114,10 @@ func (r *Runner) modelReply(s *state, subject contract.SubjectID, req contract.M
 	for s.ctx.Err() == nil {
 		event, err := stream.Recv()
 		if err != nil {
-			code := contract.StopModelFailure
 			if errors.Is(err, io.EOF) {
-				code = contract.StopModelTruncated
+				err = contract.ErrModelResponseTruncated
 			}
-			s.failModel(contract.Failed, code, 0)
+			s.failAdapter(err)
 			return nil, 0
 		}
 		switch event.Kind {
@@ -148,6 +147,26 @@ func (r *Runner) modelReply(s *state, subject contract.SubjectID, req contract.M
 	}
 	s.failModel(contract.Failed, contract.StopModelFailure, 0)
 	return nil, 0
+}
+
+func (s *state) failAdapter(err error) {
+	var code contract.StopCode
+	switch {
+	case errors.Is(err, contract.ErrModelAuthFailed):
+		code = contract.StopModelAuthFailed
+	case errors.Is(err, contract.ErrModelNotFound):
+		code = contract.StopModelNotFound
+	case errors.Is(err, contract.ErrModelResponseTruncated):
+		code = contract.StopModelTruncated
+	case errors.Is(err, contract.ErrModelResponseProtocol):
+		code = contract.StopModelProtocol
+	case errors.Is(err, contract.ErrModelOutputLimit):
+		s.failModel(contract.BudgetExceeded, contract.StopModelOutputLimit, s.budget.output)
+		return
+	default:
+		code = contract.StopModelFailure
+	}
+	s.failModel(contract.Failed, code, 0)
 }
 
 func (s *state) failModel(outcome contract.RunOutcome, code contract.StopCode, limit uint64) {

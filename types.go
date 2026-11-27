@@ -98,6 +98,8 @@ const (
 	Failed                   = contract.Failed
 	StopCancelled            = contract.StopCancelled
 	StopDeadline             = contract.StopDeadline
+	StopModelAuthFailed      = contract.StopModelAuthFailed
+	StopModelNotFound        = contract.StopModelNotFound
 	StopModelFailure         = contract.StopModelFailure
 	StopModelTruncated       = contract.StopModelTruncated
 	StopModelProtocol        = contract.StopModelProtocol
@@ -108,6 +110,11 @@ const (
 var (
 	ErrReadLimit              = contract.ErrReadLimit
 	ErrInvalidConfiguration   = contract.ErrInvalidConfiguration
+	ErrModelAuthFailed        = contract.ErrModelAuthFailed
+	ErrModelNotFound          = contract.ErrModelNotFound
+	ErrModelResponseTruncated = contract.ErrModelResponseTruncated
+	ErrModelResponseProtocol  = contract.ErrModelResponseProtocol
+	ErrModelOutputLimit       = contract.ErrModelOutputLimit
 	ErrBindingNotFound        = contract.ErrBindingNotFound
 	ErrAccessDenied           = contract.ErrAccessDenied
 	ErrInvalidRequest         = contract.ErrInvalidRequest
