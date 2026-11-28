@@ -185,23 +185,31 @@ func (b Backend) Seal(ctx context.Context, turn api.Turn) error {
 
 func (b Backend) Publish(ctx context.Context, id contract.RunID, digest string) (published api.Receipt, err error) {
 	err = b.lockedIndex(ctx, func(idx Index) error {
-		if receipt, ok := idx.Receipt(id); ok {
+		receipt, committed := idx.Receipt(id)
+		if committed {
 			if receipt.Digest != digest {
 				return ErrContent
 			}
-			published = api.Receipt(receipt)
-			return b.Sync()
+			if err := b.Sync(); err != nil {
+				return err
+			}
+		} else {
+			turn, err := b.ReadSealed(idx, id)
+			if err != nil {
+				return err
+			}
+			if turn.Digest != digest {
+				return ErrContent
+			}
+			receipt, err = b.Store.Publish(idx, turn)
+			if err != nil {
+				return err
+			}
 		}
-		turn, err := b.ReadSealed(idx, id)
-		if err != nil {
-			return err
-		}
-		if turn.Digest != digest {
-			return ErrContent
-		}
-		receipt, err := b.Store.Publish(idx, turn)
+		// The index is durable. Cleanup is safe even if a prior attempt removed the seal.
+		_ = os.Remove(b.turnPath(id))
 		published = api.Receipt(receipt)
-		return err
+		return nil
 	})
 	return published, err
 }

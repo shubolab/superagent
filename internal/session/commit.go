@@ -84,7 +84,6 @@ func (s *Store) Publish(idx Index, turn Turn) (Receipt, error) {
 	if err := s.Save(idx); err != nil {
 		return Receipt{}, err
 	}
-	_ = os.Remove(s.turnPath(turn.RunID))
 	return turn.Receipt, nil
 }
 

@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -131,27 +132,36 @@ func TestStageCSessionChild(t *testing.T) {
 	s := openTestSession(t, ctx, client, root, "conversation")
 	stop := (&recoveryFixture{barrier: action}).stopAt
 	switch action {
-	case "first", "sealed", "published", "unsealed":
+	case "first", "sealed", "indexed", "published", "unsealed":
 		req := sessionRequest(s, "first")
 		result := waitSessionRun(t, ctx, startSessionRun(t, ctx, s, req), contract.Succeeded)
 		sessionLog(t, root, "session-ids", req.ID)
 		if action == "unsealed" {
 			return
 		}
-		if action == "sealed" {
-			lock, err := fileSessionStore(s).Lock(ctx)
+		if action == "sealed" || action == "indexed" {
+			store := fileSessionStore(s)
+			lock, err := store.Lock(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer lock.Close()
-			idx, err := fileSessionStore(s).Load()
+			idx, err := store.Load()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, published, err := fileSessionStore(s).PrepareCommit(idx, req.ID, &result); err != nil || published {
+			turn, published, err := store.PrepareCommit(idx, req.ID, &result)
+			if err != nil || published {
 				t.Fatalf("seal: published %v, %v", published, err)
 			}
 			stop("sealed")
+			// Backend.Publish cleans up after this durable index update.
+			receipt, err := store.Publish(idx, turn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessionLog(t, root, "session-indexed-receipt", SessionCommit(receipt))
+			stop("indexed")
 		}
 		receipt := commitSessionRun(t, ctx, s, req.ID, 1)
 		stop("published")
@@ -316,11 +326,28 @@ func TestStageCSessionC2RecoverAdmission(t *testing.T) {
 }
 
 func TestStageCSessionC3CrashCommit(t *testing.T) {
-	for _, stage := range []string{"sealed", "published"} {
+	for _, stage := range []string{"sealed", "indexed", "published"} {
 		t.Run(stage, func(t *testing.T) {
 			root, ctx := t.TempDir(), sessionTestContext(t)
 			client := plainSessionClient(t, root, "v1", time.Minute)
 			runSessionChild(t, root, stage, stage)
+			var original []SessionCommit
+			var historyPath, sealPath string
+			var originalHistory []byte
+			if stage == "indexed" {
+				original = readRecoveryLog[SessionCommit](t, root, "session-indexed-receipt")
+				if len(original) != 1 || original[0].Version != 1 {
+					t.Fatalf("missing durable receipt at crash: %+v", original)
+				}
+				historyPath = evidenceFixturePath(t, root, "sessions/*.session.jsonl")
+				sealPath = evidenceFixturePath(t, root, "sessions/*.turn")
+				var err error
+				originalHistory, err = os.ReadFile(historyPath)
+				var row SessionCommit
+				if err != nil || bytes.Count(originalHistory, []byte{'\n'}) != 1 || json.Unmarshal(originalHistory, &row) != nil || row != original[0] {
+					t.Fatalf("expected one published JSONL row with the original receipt: %s (%v)", originalHistory, err)
+				}
+			}
 			s := openTestSession(t, ctx, client, root, "conversation")
 			if stage == "sealed" {
 				assertSessionVersion(t, ctx, s, 0, 0)
@@ -347,6 +374,15 @@ func TestStageCSessionC3CrashCommit(t *testing.T) {
 				t.Fatalf("concurrent receipts diverged: %+v", receipts)
 			}
 			assertSessionVersion(t, ctx, s, 1, 2)
+			if stage == "indexed" {
+				history, err := os.ReadFile(historyPath)
+				if err != nil || !bytes.Equal(history, originalHistory) || receipts[0] != original[0] {
+					t.Fatalf("retries changed JSONL or receipt: %s, %+v (%v)", history, receipts, err)
+				}
+				if _, err := os.Stat(sealPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("published seal still exists after retry: %v", err)
+				}
+			}
 			runSessionChild(t, root, "second", "")
 			runSessionChild(t, root, "commit-expired", "")
 			receipts = readRecoveryLog[SessionCommit](t, root, "session-commits")
