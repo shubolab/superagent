@@ -15,10 +15,10 @@ import (
 )
 
 func searchRecoverReceipt(t *testing.T, binary string) {
-	for _, mode := range []string{"probe", "production"} {
+	for _, mode := range []string{"probe", "production", "missing-meter", "mismatched-meter", "over-limit-meter"} {
 		t.Run(mode, func(t *testing.T) {
 			s := newSearchCase(t, binary)
-			old, id, _, entry := s.holdOriginal("recover-a")
+			old, id, receiptPath, entry := s.holdOriginal("recover-a")
 			old.expect("[甲 · 运行中]", "工具 · search", "搜索中")
 			old.send("\t")
 			rejectFrame(t, old.expect("[乙 · 空闲]"), "工具 · search")
@@ -27,8 +27,25 @@ func searchRecoverReceipt(t *testing.T, binary string) {
 			before := s.checkpoint(id)
 			old.stop(true)
 			s.file("docs/health.txt", "status=changed\n")
-
-			child := mode
+			if before.Intent == nil || entry.Scan == nil || entry.Scan.Bytes != 13 ||
+				entry.Scan.Limit != before.Intent.Limits.MaxScanBytes {
+				t.Fatalf("missing original environment meter: %+v, intent %+v", entry.Scan, before.Intent)
+			}
+			scan := entry.Scan.Bytes
+			switch mode {
+			case "missing-meter":
+				entry.Scan = nil
+			case "mismatched-meter":
+				entry.Scan.Bytes = 0
+			case "over-limit-meter":
+				entry.Scan.Bytes = entry.Scan.Limit + 1
+			}
+			if mode != "probe" && mode != "production" {
+				scan = before.Intent.Limits.MaxScanBytes
+				_, err := durable.Write(receiptPath, entry)
+				must(t, err)
+			}
+			child := "probe"
 			if child == "production" {
 				child = ""
 			}
@@ -61,28 +78,33 @@ func searchRecoverReceipt(t *testing.T, binary string) {
 			verifyRun(t, after, id, sdk.Succeeded, 2)
 			receiptBytes, err := json.Marshal(entry.Result)
 			must(t, err)
-			// The live environment meter is gone. The Run uses its original
-			// scan reservation and the verified receipt size, once each.
 			if before.Intent == nil || before.Intent.Key != entry.Key || after.Intent != nil ||
-				!after.Deadline.Equal(before.Deadline) || after.Balance.Scan != before.Balance.Scan-before.Intent.Limits.MaxScanBytes ||
+				!after.Deadline.Equal(before.Deadline) || after.Balance.Scan != before.Balance.Scan-scan ||
 				after.Balance.Output != before.Balance.Output-uint64(len(receiptBytes)+len("continued-a")) ||
 				after.Balance.ToolRequests != before.Balance.ToolRequests {
 				t.Fatalf("original budget/output changed when resuming: before=%+v after=%+v", before.Balance, after.Balance)
 			}
-			if s.index("甲", 1, "").Receipts[0].RunID != id {
+			commit := s.index("甲", 1, "").Receipts[0]
+			if commit.RunID != id {
 				t.Fatal("recovery committed a different Run")
 			}
+			reopened := s.start(s.workspace, "")
+			reopened.expect("[甲 · 空闲]", "continued-a")
+			if s.checkpoint(id).Balance != after.Balance || s.index("甲", 1, "").Receipts[0] != commit {
+				t.Fatal("second restart changed the settled budget or receipt")
+			}
+			reopened.stop(false)
 			s.probeCount("execute", id, 1)
 			s.probeCount("invoke", id, 1)
-			if mode == "probe" {
+			if child == "probe" {
 				s.probeCount("query", id, 1)
 				if event := s.probes("query", id)[0]; event.Key != entry.Key {
 					t.Fatalf("queried another call: %+v", event)
 				}
 			}
 			s.wire.count("recover-a", 2)
-			t.Logf("%s RunID=%s CallID=%s Step 1→2; receipt=%d scanned=13 scan reservation charged=%d history=v1",
-				mode, id, entry.Key.CallID, len(receiptBytes), before.Intent.Limits.MaxScanBytes)
+			t.Logf("%s RunID=%s CallID=%s Step 1→2; receipt=%d scanned=13 charged=%d history=v1",
+				mode, id, entry.Key.CallID, len(receiptBytes), scan)
 		})
 	}
 }

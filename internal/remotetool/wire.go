@@ -33,8 +33,9 @@ type request struct {
 type response struct {
 	ID       string
 	Identity contract.RemoteToolIdentity
-	Receipt  *contract.ToolReceipt `json:",omitempty"`
-	Ready    bool                  `json:",omitempty"`
+	Receipt  *contract.ToolReceipt    `json:",omitempty"`
+	Scan     *durable.ScanMeasurement `json:",omitempty"`
+	Ready    bool                     `json:",omitempty"`
 }
 
 func readMessage(src io.Reader, limit int64, value any) error {

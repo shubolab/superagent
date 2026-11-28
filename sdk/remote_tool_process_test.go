@@ -143,6 +143,36 @@ func TestRemoteToolServiceProcess(t *testing.T) {
 			NeedsWorkspaceWrite: true, Limits: contract.ToolLimits{MaxResultBytes: 1024, MaxScanBytes: 8},
 		}},
 	}
+	if scenario == "metered-read" {
+		serverConfig.Identity.EvidenceRule = ""
+		serverConfig.Environment, err = NewLocalReadEnvironment(map[contract.WorkspaceRef]WorkspaceConfig{
+			"project": {Root: filepath.Join(root, "workspace"), ReadPrefixes: []string{"."}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		serverConfig.Binding.Spec.NeedsWorkspaceWrite = false
+		serverConfig.Binding.Spec.NeedsReadAccess = true
+		serverConfig.Binding.Prepare = prepareMeteredRemoteRead
+		serverConfig.Binding.Tool = deliveryTool(func(ctx context.Context, req contract.ToolRequest) (contract.ToolResult, error) {
+			key, _ := InvocationReceiptKey(ctx)
+			log.append("remote-executed", key)
+			reader, err := OpenToolFile(ctx, req, "notes.txt")
+			if err != nil {
+				return contract.ToolResult{}, err
+			}
+			defer reader.Close()
+			data, err := io.ReadAll(reader)
+			if err != nil {
+				return contract.ToolResult{}, err
+			}
+			return contract.ToolResult{
+				RunID: req.RunID, CallID: req.CallID, State: contract.ToolExecutionKnown,
+				Completion: &contract.ToolCompletion{Outcome: contract.ToolSucceeded, Content: string(data)},
+				Usage:      &contract.ToolUsage{ScannedBytes: address(uint64(1))},
+			}, nil
+		})
+	}
 	handler, err := NewRemoteToolHandler(serverConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -158,6 +188,14 @@ func TestRemoteToolServiceProcess(t *testing.T) {
 	if err := server.ServeTLS(listener, "", ""); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func prepareMeteredRemoteRead(raw json.RawMessage) (string, error) {
+	var args struct{ Path string }
+	if err := json.Unmarshal(raw, &args); err != nil || args.Path != "notes.txt" {
+		return "", contract.ErrInvalidRequest
+	}
+	return args.Path, nil
 }
 
 func TestRemoteToolHandlerRejectsWorkspaceWriteWithoutEvidence(t *testing.T) {
@@ -406,6 +444,10 @@ func remoteRunConfig(t *testing.T, root, endpoint string, identity RemoteToolIde
 	if takeover {
 		recovery.Takeover = &contract.TakeoverConfig{LeaseDuration: time.Second}
 	}
+	prepare := PrepareEvidenceAppend
+	if identity.EvidenceRule == "" {
+		prepare = prepareMeteredRemoteRead
+	}
 	return MeshConfig{
 		LocalRunners: map[contract.RunnerRef]contract.RunnerConfig{"runner": {
 			AllowedModels: map[contract.SubjectID][]contract.ModelRef{"owner": {"model"}},
@@ -416,10 +458,53 @@ func remoteRunConfig(t *testing.T, root, endpoint string, identity RemoteToolIde
 		}},
 		LocalModels: map[contract.ModelRef]contract.ModelProvider{"model": model},
 		LocalTools: map[contract.ToolRef]contract.LocalToolBinding{"write": {
-			Tool: tool, Prepare: PrepareEvidenceAppend,
+			Tool: tool, Prepare: prepare,
 			Spec: contract.ToolSpec{InputSchema: json.RawMessage(`{"type":"object"}`), Limits: contract.ToolLimits{MaxResultBytes: 1024, MaxScanBytes: 8}},
 		}},
 		ResolveCaller: func(context.Context) (contract.SubjectID, error) { return "owner", nil },
+	}
+}
+
+func TestRemoteToolRecoveryUsesOriginalEnvironmentMeter(t *testing.T) {
+	requireLocalRecovery(t)
+	root := makeRecoveryRoot(t)
+	makeRemoteCertificates(t, root)
+	_, identity := remoteEvidenceWorkspace(t, root)
+	identity.EvidenceRule = ""
+	if err := os.WriteFile(filepath.Join(root, "workspace", "notes.txt"), []byte("abc"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, endpoint, stop := launchRemoteService(t, root, "original", "metered-read")
+	proxy := newRemoteProxy(t, root, endpoint, "cut")
+	proxy.holdQueries.Store(true)
+	model := defaultRecoveryFixture(root)
+	client := remoteRunClient(t, root, proxy.server.URL, identity, model, 2500*time.Millisecond, false)
+	run, err := client.Start(t.Context(), contract.StartRequest{
+		ID: recoveryID, Model: "model", Recoverable: true, Tools: []contract.ToolRef{"write"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	if err := waitTakeoverMarker(ctx, root, "remote-before-query"); err != nil {
+		t.Fatal(err)
+	}
+	before := readRemoteSnapshot(t, root, "remote-before-query")
+	stop()
+	_, replacement, _ := launchRemoteService(t, root, "replacement", "metered-read")
+	proxy.target.Store(replacement)
+	proxy.holdQueries.Store(false)
+	result, err := run.Wait(ctx)
+	if err != nil || result.Outcome != contract.Succeeded {
+		t.Fatalf("recovered remote read: %+v (%v)", result, err)
+	}
+	after := readRecoveryCheckpoint(t, root)
+	results := stageBToolResults(t, result.Messages)
+	if before.Intent == nil || before.Intent.Limits.MaxScanBytes != 8 || after.Balance.Scan != before.Balance.Scan-3 ||
+		len(results) != 1 || results[0].Usage == nil || results[0].Usage.ScannedBytes == nil || *results[0].Usage.ScannedBytes != 3 ||
+		proxy.sends.Load() != 1 || len(readRecoveryLog[contract.ReceiptKey](t, root, "remote-executed")) != 1 {
+		t.Fatalf("original environment meter or invocation count changed: before=%+v, after=%+v, results=%+v", before.Balance, after.Balance, results)
 	}
 }
 

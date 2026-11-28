@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"time"
 
 	"github.com/shubolab/superagent/internal/contract"
+	"github.com/shubolab/superagent/internal/durable"
 	"github.com/shubolab/superagent/internal/remotetool"
 )
 
@@ -103,8 +105,12 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 			if err != nil {
 				return MeshReply{}, err
 			}
-			receipt, err := remote.QueryRemote(ctx, key, e.Run, owner, req.Tool.Limits)
-			return MeshReply{Receipt: receipt}, err
+			reply, err := remote.QueryRemote(ctx, key, e.Run, owner, req.Tool.Limits)
+			result := MeshReply{Receipt: reply.Receipt}
+			if reply.Receipt != nil {
+				result.MeasuredScanBytes = reply.Scan.VerifiedBytes(req.Tool.Limits.MaxScanBytes, reply.Receipt.Result)
+			}
+			return result, err
 		}
 		if key.Remote != (contract.RemoteToolIdentity{}) {
 			return MeshReply{}, contract.ErrRecoveryBinding
@@ -113,8 +119,13 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		if !ok {
 			return MeshReply{}, contract.ErrRecoveryUnavailable
 		}
-		receipt, err := provider.QueryReceipt(contract.WithoutStorageRun(ctx), key)
-		return MeshReply{Receipt: receipt}, err
+		lookupCtx, scan := durable.WithReceiptScan(contract.WithoutStorageRun(ctx), key, req.Tool.Limits.MaxScanBytes, nil)
+		receipt, err := provider.QueryReceipt(lookupCtx, key)
+		reply := MeshReply{Receipt: receipt}
+		if receipt != nil && receipt.Key == key {
+			reply.MeasuredScanBytes = scan.Measurement(receipt.Result).VerifiedBytes(req.Tool.Limits.MaxScanBytes, receipt.Result)
+		}
+		return reply, err
 	}
 	if req.Operation == Invoke {
 		binding, ok := l.tools[req.Tool.Tool]
@@ -140,14 +151,16 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 			if err != nil {
 				return MeshReply{}, errors.Join(contract.ErrNotDelivered, err)
 			}
-			receipt, err := remote.InvokeRemote(ctx, key, e.Run, owner, req.Tool)
+			reply, err := remote.InvokeRemote(ctx, key, e.Run, owner, req.Tool)
 			if errors.Is(err, remotetool.ErrResponseLost) {
 				return MeshReply{}, errors.Join(ErrResponseLost, err)
 			}
 			if err != nil {
 				return MeshReply{}, err
 			}
-			return MeshReply{Tool: receipt.Result, Cleanup: receipt.Cleanup}, nil
+			receipt := reply.Receipt
+			return MeshReply{Tool: receipt.Result, Cleanup: receipt.Cleanup,
+				MeasuredScanBytes: reply.Scan.VerifiedBytes(req.Tool.Limits.MaxScanBytes, receipt.Result)}, nil
 		}
 		if req.ReceiptKey.Remote != (contract.RemoteToolIdentity{}) {
 			return MeshReply{}, errors.Join(contract.ErrNotDelivered, contract.ErrRecoveryBinding)
@@ -178,18 +191,24 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		if binding.Spec.NeedsWorkspaceWrite {
 			toolCtx = l.withWorkspacePublisher(toolCtx, e, req.Tool, req.ReceiptKey)
 		}
-		if key := req.ReceiptKey; key != (contract.ReceiptKey{}) {
+		key := req.ReceiptKey
+		var measure func() (uint64, error)
+		if key != (contract.ReceiptKey{}) {
 			if !validReceiptRoute(key, e) || key.Tool != req.Tool.Tool || key.CallID != req.Tool.CallID {
 				return MeshReply{}, errors.Join(contract.ErrNotDelivered, contract.ErrAccessDenied)
 			}
 			toolCtx = contract.WithReceiptKey(toolCtx, key)
+			if e.Grant != "" {
+				measure = func() (uint64, error) { return l.measureReceiptScan(ctx, e) }
+			}
 		}
+		toolCtx, scan := durable.WithReceiptScan(toolCtx, key, req.Tool.Limits.MaxScanBytes, measure)
 		result, err := binding.Tool.Invoke(contract.WithoutStorageRun(toolCtx), req.Tool)
 		if err != nil {
 			// Delivery already happened. An error from the tool is not Mesh delivery evidence.
 			return MeshReply{}, fmt.Errorf("tool invocation: %v", err)
 		}
-		return MeshReply{Tool: result}, nil
+		return MeshReply{Tool: result, MeasuredScanBytes: scan.Measurement(result).VerifiedBytes(req.Tool.Limits.MaxScanBytes, result)}, nil
 	}
 	env, ok := l.environments[e.Ref]
 	if !ok {
@@ -261,6 +280,26 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		return MeshReply{}, env.Release(envCtx, e.Run, e.Handle)
 	default:
 		return MeshReply{}, contract.ErrInvalidRequest
+	}
+}
+
+func (l *Local) measureReceiptScan(ctx context.Context, e EnvironmentRequest) (uint64, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 200*time.Millisecond)
+	defer cancel()
+	type meterResult struct {
+		bytes uint64
+		err   error
+	}
+	done := make(chan meterResult, 1)
+	go func() {
+		reply, err := l.Call(ctx, MeshRequest{Operation: RevokeEnvironment, Environment: e})
+		done <- meterResult{reply.Scanned, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case result := <-done:
+		return result.bytes, result.err
 	}
 }
 

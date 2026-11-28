@@ -66,22 +66,23 @@ type MeshRequest struct {
 }
 
 type MeshReply struct {
-	RunID            contract.RunID
-	Result           contract.Result
-	Tool             contract.ToolResult
-	Handle           contract.EnvironmentHandle
-	Grant            contract.EnvironmentGrantRef
-	Reader           io.ReadCloser
-	Scanned          uint64
-	ModelLimits      contract.ModelContextLimits
-	Measurement      contract.InputTokenMeasurement
-	SourcePage       contract.ContextSourcePage
-	ReadCapabilities *contract.EnvironmentReadCapabilities
-	RawOutputBytes   uint64
-	Receipt          *contract.ToolReceipt
-	Cleanup          contract.CleanupStatus
-	WorkspaceVersion string
-	ArtifactPage     contract.ArtifactPage
+	RunID             contract.RunID
+	Result            contract.Result
+	Tool              contract.ToolResult
+	Handle            contract.EnvironmentHandle
+	Grant             contract.EnvironmentGrantRef
+	Reader            io.ReadCloser
+	Scanned           uint64
+	MeasuredScanBytes *uint64
+	ModelLimits       contract.ModelContextLimits
+	Measurement       contract.InputTokenMeasurement
+	SourcePage        contract.ContextSourcePage
+	ReadCapabilities  *contract.EnvironmentReadCapabilities
+	RawOutputBytes    uint64
+	Receipt           *contract.ToolReceipt
+	Cleanup           contract.CleanupStatus
+	WorkspaceVersion  string
+	ArtifactPage      contract.ArtifactPage
 }
 
 type MeshFrame struct {

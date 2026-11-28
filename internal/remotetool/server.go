@@ -96,8 +96,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply := response{ID: msg.ID, Identity: s.cfg.Identity}
+	ctx, scan := durable.WithReceiptScan(r.Context(), msg.Key, msg.Limits.MaxScanBytes, nil)
 	if invoke {
-		receipt, err := s.invoke(r.Context(), msg)
+		receipt, err := s.invoke(ctx, msg)
 		if errors.Is(err, contract.ErrStartConflict) {
 			http.Error(w, "request fingerprint conflicts with original invocation", http.StatusConflict)
 			return
@@ -109,7 +110,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply.Receipt = &receipt
 	} else {
 		until := minTime(msg.Deadline, msg.Scope.Deadline)
-		ctx, cancel := context.WithDeadline(r.Context(), until)
+		ctx, cancel := context.WithDeadline(ctx, until)
 		defer cancel()
 		if msg.Owner.Epoch != 0 {
 			if s.cfg.Authority == nil || s.cfg.Authority.ReadRemote(ctx, msg.Key, msg.Scope, msg.Owner, msg.Workspace) != nil {
@@ -127,6 +128,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			reply.Receipt = receipt
 		}
+	}
+	if reply.Receipt != nil {
+		reply.Scan = scan.Measurement(reply.Receipt.Result)
 	}
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(5 * time.Second))
 	w.Header().Set("Content-Type", "application/json")
@@ -199,26 +203,27 @@ func (s *server) invoke(ctx context.Context, msg request) (contract.ToolReceipt,
 	return s.journal.InvokeReceipt(ctx, msg.Key, *msg.Tool)
 }
 
-func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result contract.ToolResult, cleanup contract.CleanupStatus, err error) {
+func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result contract.ToolResult, cleanup contract.CleanupStatus, scan *durable.ScanMeasurement, err error) {
 	call := ctx.Value(executionKey{}).(execution)
 	if call.Owner.Epoch != 0 {
 		if s.cfg.Authority == nil {
-			return result, cleanup, contract.ErrAccessDenied
+			return result, cleanup, nil, contract.ErrAccessDenied
 		}
 		if err := s.cfg.Authority.AdmitRemote(ctx, call.Key, call.Scope, call.Owner, req, call.path); err != nil {
-			return result, cleanup, err
+			return result, cleanup, nil, err
 		}
 	}
 	if call.write != nil {
-		return s.executeWrite(ctx, call, req)
+		result, cleanup, err := s.executeWrite(ctx, call, req)
+		return result, cleanup, nil, err
 	}
 	spec := s.cfg.Binding.Spec
 	if err := s.verifyWorkspace(ctx, call.Scope); err != nil {
-		return result, cleanup, err
+		return result, cleanup, nil, err
 	}
 	if !spec.NeedsReadAccess {
 		result, err = s.cfg.Binding.Tool.Invoke(ctx, req)
-		return result, contract.CleanupReleased, err
+		return result, contract.CleanupReleased, nil, err
 	}
 
 	env := s.cfg.Environment
@@ -226,7 +231,7 @@ func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result 
 	scope.Workspace = s.cfg.Identity.Workspace
 	handle, err := env.Allocate(ctx, scope)
 	if err != nil {
-		return result, contract.CleanupPending, err
+		return result, contract.CleanupPending, nil, err
 	}
 	callScope := contract.CallScope{Run: scope, CallID: req.CallID, Tool: req.Tool, Handle: handle, Path: call.path, Limits: req.Limits}
 	var grant contract.EnvironmentGrantRef
@@ -241,8 +246,8 @@ func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result 
 		if result.State == contract.ToolExecutionNotExecuted && (scanned > 0 || revokeErr != nil) {
 			err = contract.ErrRecoveryUnavailable
 		}
-		if err == nil && revokeErr == nil && scanned <= req.Limits.MaxScanBytes {
-			result.Usage = &contract.ToolUsage{ScannedBytes: &scanned}
+		if err == nil && grant != "" && revokeErr == nil && scanned <= req.Limits.MaxScanBytes {
+			scan = &durable.ScanMeasurement{Limit: req.Limits.MaxScanBytes, Bytes: scanned}
 		}
 		cleanup = contract.CleanupReleased
 		if errors.Join(revokeErr, env.Release(cleanupCtx, scope, handle)) != nil {
@@ -251,7 +256,7 @@ func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result 
 	}()
 	grant, err = env.Grant(ctx, callScope, ".")
 	if err != nil {
-		return result, cleanup, err
+		return result, cleanup, nil, err
 	}
 	req.EnvironmentGrant = grant
 	authorized := func(claimed contract.ToolRequest, path string) bool {
@@ -265,7 +270,7 @@ func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result 
 		return env.OpenRead(ctx, callScope, grant, path)
 	})
 	result, err = s.cfg.Binding.Tool.Invoke(toolCtx, req)
-	return result, cleanup, err
+	return result, cleanup, scan, err
 }
 
 func (s *server) verifyWorkspace(ctx context.Context, scope contract.RunScope) error {

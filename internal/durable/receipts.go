@@ -13,7 +13,7 @@ import (
 type ReceiptTool struct {
 	Directory string
 	Tool      contract.Tool
-	Execute   func(context.Context, contract.ToolRequest) (contract.ToolResult, contract.CleanupStatus, error)
+	Execute   func(context.Context, contract.ToolRequest) (contract.ToolResult, contract.CleanupStatus, *ScanMeasurement, error)
 }
 
 type receiptRecord struct {
@@ -21,6 +21,7 @@ type receiptRecord struct {
 	Write   *contract.WriteIntent `json:",omitempty"`
 	Result  *contract.ToolResult
 	Cleanup contract.CleanupStatus `json:",omitempty"`
+	Scan    *ScanMeasurement       `json:",omitempty"`
 }
 
 func (t *ReceiptTool) path(key contract.ReceiptKey) string {
@@ -70,6 +71,7 @@ func (t *ReceiptTool) invokeReceipt(ctx context.Context, key contract.ReceiptKey
 		return empty, err
 	}
 	defer lock.Close()
+	capture := receiptScanCapture(ctx, key)
 	var record receiptRecord
 	err = Read(path, &record)
 	if err == nil {
@@ -78,6 +80,9 @@ func (t *ReceiptTool) invokeReceipt(ctx context.Context, key contract.ReceiptKey
 		}
 		if record.Result == nil {
 			return empty, contract.ErrRecoveryUnavailable
+		}
+		if capture != nil && record.Scan != nil && SyncDirectory(t.Directory) == nil {
+			capture.report(record.Scan)
 		}
 		return contract.ToolReceipt{Key: key, Result: *record.Result, Cleanup: record.Cleanup}, nil
 	}
@@ -93,13 +98,31 @@ func (t *ReceiptTool) invokeReceipt(ctx context.Context, key contract.ReceiptKey
 	}
 	var result contract.ToolResult
 	var cleanup contract.CleanupStatus
+	var scan *ScanMeasurement
 	if t.Execute != nil {
-		result, cleanup, err = t.Execute(ctx, req)
+		result, cleanup, scan, err = t.Execute(ctx, req)
 	} else {
 		result, err = t.Tool.Invoke(ctx, req)
+		if err == nil && capture != nil && capture.measure != nil {
+			if bytes, meterErr := capture.measure(); meterErr == nil && bytes <= capture.limit {
+				scan = &ScanMeasurement{Limit: capture.limit, Bytes: bytes}
+			}
+		}
 	}
 	if err != nil {
 		return empty, err
+	}
+	if scan != nil {
+		if result.State == contract.ToolExecutionNotExecuted && scan.Bytes != 0 {
+			return empty, contract.ErrRecoveryUnavailable
+		}
+		var usage contract.ToolUsage
+		if result.Usage != nil {
+			usage = *result.Usage
+		}
+		bytes := scan.Bytes
+		usage.ScannedBytes = &bytes
+		result.Usage = &usage
 	}
 	reply := contract.ToolReceipt{Key: key, Result: result, Cleanup: cleanup}
 	if !contract.ValidToolResult(result, key.RunID, key.CallID) ||
@@ -113,10 +136,11 @@ func (t *ReceiptTool) invokeReceipt(ctx context.Context, key contract.ReceiptKey
 		return reply, nil
 	}
 	// Filesystem commits are independent of cancellation of the response connection.
-	record.Result, record.Cleanup = &result, cleanup
+	record.Result, record.Cleanup, record.Scan = &result, cleanup, scan
 	if _, err := Write(path, record); err != nil {
 		return empty, err
 	}
+	capture.report(scan)
 	return reply, nil
 }
 
@@ -145,6 +169,9 @@ func (t *ReceiptTool) LookupReceipt(ctx context.Context, key contract.ReceiptKey
 			return nil, nil, contract.ErrAccessDenied
 		}
 		return nil, record.Write, nil
+	}
+	if capture := receiptScanCapture(ctx, key); capture != nil && record.Scan != nil && SyncDirectory(t.Directory) == nil {
+		capture.report(record.Scan)
 	}
 	return &contract.ToolReceipt{Key: record.Key, Result: *record.Result, Cleanup: record.Cleanup}, nil, nil
 }

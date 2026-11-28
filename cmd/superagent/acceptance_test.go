@@ -275,6 +275,7 @@ type journalEntry struct {
 	Key     sdk.ReceiptKey
 	Result  *sdk.ToolResult
 	Cleanup sdk.CleanupStatus
+	Scan    *durable.ScanMeasurement `json:",omitempty"`
 }
 
 func (s *searchCase) checkpoint(id sdk.RunID) runRecord {

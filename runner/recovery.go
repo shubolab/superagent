@@ -703,6 +703,10 @@ func (r *Runner) reconcileTool(s *state, a *activity, balance *limits, intent to
 		}
 		verified = *reply.Receipt
 		verified.Result = cloneToolResult(value)
+		if used := reply.MeasuredScanBytes; used != nil && *used <= intent.Limits.MaxScanBytes &&
+			value.Usage != nil && value.Usage.ScannedBytes != nil && *value.Usage.ScannedBytes == *used {
+			scanned = *used
+		}
 		return true
 	}, key.Remote != (contract.RemoteToolIdentity{}), durableArtifact) {
 		result = verified.Result
@@ -720,7 +724,7 @@ func (r *Runner) reconcileTool(s *state, a *activity, balance *limits, intent to
 			a.cleanupPending = true
 		}
 	}
-	// Recovery cannot re-read the original environment and artifact meters.
+	// Recovery uses original durable measurements or settles the reserved amount.
 	if key.Remote != (contract.RemoteToolIdentity{}) {
 		s.recordRemoteCleanup(cleanup)
 	}

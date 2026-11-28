@@ -6,6 +6,8 @@
 
 `TestAnthropicLiveSearch` 通过。两轮模型请求完成，搜索仅执行一次，实际读取 13 字节。模型返回配对结果和最终答复。供应商报告 478 个输入 token、87 个输出 token，总耗时 5.12 秒。
 
+2026-11-29 使用相同 CC Switch Claude 模型 `glm-5.3-flash` 复验。SDK 冒烟通过。实际命令经 PTY、`-workspace` 和 `-discard-thinking` 跑通搜索与回复。搜索执行一次，回执持有 13 B 环境计量，JSONL 持久化为版本 1。
+
 ## 计量校准
 
 - 网关的 `count_tokens` 返回 HTTP 404。本地采用公开 GLM tokenizer 和 chat template，以 Anthropic 请求中的实际指令、消息及工具编码为输入。将声明与配对回执映射成对应工具角色。 [固定模型资产版本](https://huggingface.co/zai-org/GLM-5.3-Flash/tree/46a050bec13002ad29ee795c16e61cf4fa3c4a9c)

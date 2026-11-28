@@ -69,14 +69,12 @@ func (*Client) QueryReceipt(context.Context, contract.ReceiptKey) (*contract.Too
 	return nil, contract.ErrAccessDenied
 }
 
-func (c *Client) InvokeRemote(ctx context.Context, key contract.ReceiptKey, scope contract.RunScope, owner contract.RemoteOwner, req contract.ToolRequest) (*contract.ToolReceipt, error) {
-	reply, err := c.call(ctx, invokePath, request{Key: key, Scope: scope, Owner: owner, Tool: &req, Limits: req.Limits}, req.Limits.MaxResultBytes)
-	return reply.Receipt, err
+func (c *Client) InvokeRemote(ctx context.Context, key contract.ReceiptKey, scope contract.RunScope, owner contract.RemoteOwner, req contract.ToolRequest) (response, error) {
+	return c.call(ctx, invokePath, request{Key: key, Scope: scope, Owner: owner, Tool: &req, Limits: req.Limits}, req.Limits.MaxResultBytes)
 }
 
-func (c *Client) QueryRemote(ctx context.Context, key contract.ReceiptKey, scope contract.RunScope, owner contract.RemoteOwner, limits contract.ToolLimits) (*contract.ToolReceipt, error) {
-	reply, err := c.call(ctx, queryPath, request{Key: key, Scope: scope, Owner: owner, Limits: limits}, limits.MaxResultBytes)
-	return reply.Receipt, err
+func (c *Client) QueryRemote(ctx context.Context, key contract.ReceiptKey, scope contract.RunScope, owner contract.RemoteOwner, limits contract.ToolLimits) (response, error) {
+	return c.call(ctx, queryPath, request{Key: key, Scope: scope, Owner: owner, Limits: limits}, limits.MaxResultBytes)
 }
 
 func (c *Client) VerifyWorkspace(ctx context.Context, key contract.ReceiptKey, scope contract.RunScope, owner contract.RemoteOwner) error {

@@ -396,22 +396,19 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	if binding.Spec.NeedsContextSource {
 		invokeCtx = contract.WithContextSource(invokeCtx, invocationSource{state: s, call: req.CallID})
 	}
-	result, remoteCleanup := invoke(invokeCtx, a.transport, e, req, key)
+	reply := invoke(invokeCtx, a.transport, e, req, key)
+	result, remoteCleanup := reply.Tool, reply.Cleanup
 	var measured uint64
 	verified := e.Grant == ""
-	if e.Grant != "" {
+	switch {
+	case reply.MeasuredScanBytes != nil:
+		measured = *reply.MeasuredScanBytes
+		verified = measured <= req.Limits.MaxScanBytes
+	case e.Grant != "":
 		meter, err := a.cleanupCall(mesh.RevokeEnvironment, e, contract.ReceiptKey{})
 		measured, verified = meter.Scanned, err == nil && meter.Scanned <= req.Limits.MaxScanBytes
-	}
-	if key.Remote != (contract.RemoteToolIdentity{}) {
+	case key.Remote != (contract.RemoteToolIdentity{}):
 		verified = result.State == contract.ToolExecutionNotExecuted
-		if result.Usage != nil && result.Usage.ScannedBytes != nil {
-			measured = *result.Usage.ScannedBytes
-			verified = measured <= req.Limits.MaxScanBytes
-			if !verified {
-				result = contract.ToolResult{}
-			}
-		}
 	}
 	if (verified && measured > 0) && result.State == contract.ToolExecutionNotExecuted {
 		result = contract.ToolResult{}
@@ -496,7 +493,7 @@ type componentReply struct {
 	err   error
 }
 
-func invoke(ctx context.Context, transport mesh.MeshTransport, e mesh.EnvironmentRequest, req contract.ToolRequest, key contract.ReceiptKey) (contract.ToolResult, contract.CleanupStatus) {
+func invoke(ctx context.Context, transport mesh.MeshTransport, e mesh.EnvironmentRequest, req contract.ToolRequest, key contract.ReceiptKey) mesh.MeshReply {
 	results := make(chan componentReply, 1)
 	go func() {
 		reply, err := mesh.CallReceipt(ctx, transport, mesh.Invoke, e, req, key)
@@ -511,16 +508,17 @@ func invoke(ctx context.Context, transport mesh.MeshTransport, e mesh.Environmen
 		select {
 		case response = <-results:
 		case <-timer.C:
-			return contract.ToolResult{}, ""
+			return mesh.MeshReply{}
 		}
 	}
 	if errors.Is(response.err, contract.ErrNotDelivered) {
-		return skippedTool(req, "request_not_delivered"), contract.CleanupReleased
+		return mesh.MeshReply{Tool: skippedTool(req, "request_not_delivered"), Cleanup: contract.CleanupReleased}
 	}
 	if response.err != nil {
-		return contract.ToolResult{}, ""
+		return mesh.MeshReply{}
 	}
-	return cloneToolResult(response.reply.Tool), response.reply.Cleanup
+	response.reply.Tool = cloneToolResult(response.reply.Tool)
+	return response.reply
 }
 
 func (a *activity) cleanupCall(op mesh.Operation, e mesh.EnvironmentRequest, key contract.ReceiptKey) (mesh.MeshReply, error) {
