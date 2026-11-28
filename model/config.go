@@ -26,6 +26,7 @@ const (
 )
 
 // Catalog supplies the provider, model and adapter registrations for assembly.
+// ProviderRefs must include every provider referenced by a model.
 type Catalog interface {
 	ProviderRefs() iter.Seq[string]
 	ModelRefs() iter.Seq[Ref]

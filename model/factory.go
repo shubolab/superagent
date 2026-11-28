@@ -53,16 +53,15 @@ func NewBindings(ctx context.Context, cfg Catalog, secrets CredentialSource) (*B
 	if nilModelComponent(cfg) {
 		return nil, &SetupError{Code: ConfigInvalid, Field: "models"}
 	}
-	providers, err := validateCatalog(cfg, slices.Sorted(cfg.ModelRefs()))
+	models, providers, err := validateCatalog(cfg)
 	if err != nil {
 		return nil, err
 	}
 	b := &Bindings{models: make(map[Ref]Provider), closed: make(chan struct{})}
 	clients := make(map[string]AdapterClient, len(providers))
-	for _, ref := range providers {
-		provider, _ := cfg.ProviderConfig(ref)
-		adapter, _ := cfg.AdapterConfig(provider.Adapter)
-		client, err := openProvider(ctx, ref, provider, adapter, secrets)
+	for _, ref := range slices.Sorted(maps.Keys(providers)) {
+		provider := providers[ref]
+		client, err := openProvider(ctx, ref, provider.config, provider.adapter, secrets)
 		if !nilModelComponent(client) {
 			b.clients = append(b.clients, client)
 		}
@@ -74,8 +73,7 @@ func NewBindings(ctx context.Context, cfg Catalog, secrets CredentialSource) (*B
 		}
 		clients[ref] = client
 	}
-	for ref := range cfg.ModelRefs() {
-		config := cfg.ModelConfig(ref)
+	for ref, config := range models {
 		base := boundModel{client: clients[config.Provider], modelID: config.ModelID}
 		b.models[ref] = base
 		if provider, ok := base.client.(AdapterInputMeters); ok {
@@ -87,32 +85,51 @@ func NewBindings(ctx context.Context, cfg Catalog, secrets CredentialSource) (*B
 	return b, nil
 }
 
-func validateCatalog(cfg Catalog, models []Ref) ([]string, error) {
-	if len(models) == 0 {
-		return nil, &SetupError{Code: ConfigInvalid, Field: "models"}
+type providerBinding struct {
+	config  ProviderConfig
+	adapter Adapter
+}
+
+func validateCatalog(cfg Catalog) (map[Ref]BindingConfig, map[string]providerBinding, error) {
+	modelRefs := cfg.ModelRefs()
+	if modelRefs == nil {
+		return nil, nil, &SetupError{Code: ConfigInvalid, Field: "models"}
 	}
-	for _, ref := range slices.Sorted(cfg.ProviderRefs()) {
+	refs := slices.Sorted(modelRefs)
+	if len(refs) == 0 {
+		return nil, nil, &SetupError{Code: ConfigInvalid, Field: "models"}
+	}
+	providerRefs := cfg.ProviderRefs()
+	if providerRefs == nil {
+		return nil, nil, &SetupError{Code: ConfigInvalid, Field: "providers"}
+	}
+	registeredProviders := make(map[string]providerBinding)
+	for _, ref := range slices.Sorted(providerRefs) {
 		p, registered := cfg.ProviderConfig(ref)
 		adapter, ok := cfg.AdapterConfig(p.Adapter)
 		if !registered || strings.TrimSpace(ref) == "" || p.Adapter == "" || !ok || adapter.Open == nil {
-			return nil, &SetupError{Code: ConfigInvalid, Provider: ref, Field: "adapter"}
+			return nil, nil, &SetupError{Code: ConfigInvalid, Provider: ref, Field: "adapter"}
 		}
 		if !validModelEndpoint(modelEndpoint(p, adapter)) {
-			return nil, &SetupError{Code: ConfigInvalid, Provider: ref, Field: "endpoint"}
+			return nil, nil, &SetupError{Code: ConfigInvalid, Provider: ref, Field: "endpoint"}
 		}
+		registeredProviders[ref] = providerBinding{config: p, adapter: adapter}
 	}
-	used := make(map[string]struct{})
-	for _, ref := range models {
+	models := make(map[Ref]BindingConfig, len(refs))
+	used := make(map[string]providerBinding)
+	for _, ref := range refs {
 		binding := cfg.ModelConfig(ref)
 		if strings.TrimSpace(string(ref)) == "" || strings.TrimSpace(binding.ModelID) == "" {
-			return nil, &SetupError{Code: ConfigInvalid, Model: ref, Field: "model_id"}
+			return nil, nil, &SetupError{Code: ConfigInvalid, Model: ref, Field: "model_id"}
 		}
-		if _, ok := cfg.ProviderConfig(binding.Provider); !ok {
-			return nil, &SetupError{Code: ConfigInvalid, Provider: binding.Provider, Model: ref, Field: "provider"}
+		provider, ok := registeredProviders[binding.Provider]
+		if !ok {
+			return nil, nil, &SetupError{Code: ConfigInvalid, Provider: binding.Provider, Model: ref, Field: "provider"}
 		}
-		used[binding.Provider] = struct{}{}
+		models[ref] = binding
+		used[binding.Provider] = provider
 	}
-	return slices.Sorted(maps.Keys(used)), nil
+	return models, used, nil
 }
 
 func modelEndpoint(cfg ProviderConfig, adapter Adapter) string {
