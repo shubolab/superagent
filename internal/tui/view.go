@@ -26,12 +26,10 @@ func (op *operation) observe(event sdk.Event) {
 		if event.Message != nil {
 			op.updatePreview(event.Step, event.Message.Text, true)
 		}
-	case sdk.EventToolDispatched:
-		if event.Tool != nil {
-			op.tool = string(event.Tool.Tool)
+	case sdk.EventToolDispatched, sdk.EventToolCompleted:
+		if event.Tool != nil && (event.Kind == sdk.EventToolDispatched || event.Tool.Status != "") {
+			op.updateTool(*event.Tool)
 		}
-	case sdk.EventToolCompleted:
-		op.tool = ""
 	}
 }
 
@@ -88,8 +86,8 @@ func (a *app) frame(rows, columns int) string {
 					lines = append(lines, labeledLines("助手", p.text)...)
 				}
 			}
-			if op.tool != "" {
-				lines = append(lines, "工具 · "+plain(op.tool))
+			for _, tool := range op.tools {
+				lines = append(lines, toolEventLine(tool))
 			}
 			if op.truncated {
 				lines = append(lines, "预览已截断")
@@ -131,14 +129,24 @@ func (a *app) frame(rows, columns int) string {
 
 func messageLines(messages []sdk.Message) []string {
 	var result []string
+	var calls []sdk.ModelToolCall
 	for _, message := range messages {
 		switch {
 		case message.User != nil:
+			calls = nil
 			result = historyTail(result, labeledLines("你", message.User.Text))
-		case message.Assistant != nil && message.Assistant.Text != "":
-			result = historyTail(result, labeledLines("助手", message.Assistant.Text))
+		case message.Assistant != nil:
+			calls = message.Assistant.ToolCalls
+			if message.Assistant.Text != "" {
+				result = historyTail(result, labeledLines("助手", message.Assistant.Text))
+			}
 		case message.Tool != nil:
-			result = historyTail(result, []string{"工具 · " + plain(string(message.Tool.Tool))})
+			if len(calls) > 0 && calls[0].CallID == message.Tool.Result.CallID && calls[0].Tool == message.Tool.Tool {
+				result = historyTail(result, toolResultLines(calls[0], *message.Tool))
+				calls = calls[1:]
+			} else {
+				calls = nil
+			}
 		}
 	}
 	return result

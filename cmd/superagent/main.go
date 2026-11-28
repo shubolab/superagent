@@ -26,9 +26,19 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
+	return runCommand(ctx, args, launch)
+}
+
+type terminalAssembly struct {
+	mesh     sdk.MeshConfig
+	terminal tui.Config
+}
+
+func runCommand(ctx context.Context, args []string, start func(context.Context, terminalAssembly) error) error {
 	flags := flag.NewFlagSet("superagent", flag.ContinueOnError)
 	model := flags.String("model", os.Getenv("ANTHROPIC_MODEL"), "Anthropic model ID")
 	state := flags.String("state-dir", "", "local state directory")
+	workspace := flags.String("workspace", "", "explicit read-only root for file search")
 	parallel := flags.Int("parallel", 1, "concurrent session Runs (1 or 2)")
 	sessionA := flags.String("session-a", "甲", "first session ID")
 	sessionB := flags.String("session-b", "乙", "second session ID")
@@ -50,6 +60,19 @@ func run(ctx context.Context, args []string) error {
 	directory, err := filepath.Abs(directory)
 	if err != nil {
 		return err
+	}
+	searchEnabled := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "workspace" {
+			searchEnabled = true
+		}
+	})
+	var search searchAssembly
+	if searchEnabled {
+		search, err = configureSearch(ctx, *workspace, directory, *parallel)
+		if err != nil {
+			return err
+		}
 	}
 	credential := os.Getenv("ANTHROPIC_API_KEY")
 	auth := sdk.AnthropicAuthAPIKey
@@ -80,16 +103,30 @@ func run(ctx context.Context, args []string) error {
 		Timeout: pointer(2 * time.Minute), MaxModelRequests: pointer(uint64(4)),
 		MaxModelInputBytes: pointer(uint64(256 << 10)), MaxOutputBytes: pointer(uint64(64 << 10)),
 	}
-	mesh, err := sdk.NewMesh(sdk.MeshConfig{
-		LocalRunners: map[sdk.RunnerRef]sdk.RunnerConfig{"local": {
-			AllowedModels: map[sdk.SubjectID][]sdk.ModelRef{"terminal": {"chat"}},
-			DefaultBudget: budget, BudgetCaps: budget, ObserveBufferBytes: 256 << 10, ResultRetention: 5 * time.Minute,
-			Recovery:   &sdk.RecoveryConfig{Directory: filepath.Join(directory, "runs"), BindingVersion: "terminal-v1", ReconcileTimeout: time.Second},
-			Scheduling: &sdk.SessionSchedulingConfig{MaxActiveRuns: *parallel, MaxQueuedRuns: 2, MaxQueueWait: 30 * time.Second},
-		}},
+	runner := sdk.RunnerConfig{
+		AllowedModels: map[sdk.SubjectID][]sdk.ModelRef{"terminal": {"chat"}},
+		DefaultBudget: budget, BudgetCaps: budget, ObserveBufferBytes: 256 << 10, ResultRetention: 5 * time.Minute,
+		Recovery:   &sdk.RecoveryConfig{Directory: filepath.Join(directory, "runs"), BindingVersion: "terminal-v1", ReconcileTimeout: time.Second},
+		Scheduling: &sdk.SessionSchedulingConfig{MaxActiveRuns: *parallel, MaxQueuedRuns: 2, MaxQueueWait: 30 * time.Second},
+	}
+	cfg := sdk.MeshConfig{
 		LocalModels:   bindings.LocalModels(),
 		ResolveCaller: func(context.Context) (sdk.SubjectID, error) { return "terminal", nil },
-	})
+	}
+	request := sdk.StartRequest{Model: "chat"}
+	if searchEnabled {
+		search.bind(&cfg, &runner, &request)
+	}
+	cfg.LocalRunners = map[sdk.RunnerRef]sdk.RunnerConfig{"local": runner}
+	return start(ctx, terminalAssembly{mesh: cfg, terminal: tui.Config{
+		Sessions: [2]sdk.SessionID{sdk.SessionID(*sessionA), sdk.SessionID(*sessionB)},
+		Store:    sdk.SessionConfig{Directory: filepath.Join(directory, "sessions"), MaxTurns: 512, MaxHistoryBytes: 128 << 10},
+		Request:  request,
+	}})
+}
+
+func launch(ctx context.Context, assembly terminalAssembly) error {
+	mesh, err := sdk.NewMesh(assembly.mesh)
 	if err != nil {
 		return err
 	}
@@ -97,11 +134,8 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return tui.Run(ctx, os.Stdin, os.Stdout, tui.Config{
-		Client: client, Sessions: [2]sdk.SessionID{sdk.SessionID(*sessionA), sdk.SessionID(*sessionB)},
-		Store:   sdk.SessionConfig{Directory: filepath.Join(directory, "sessions"), MaxTurns: 512, MaxHistoryBytes: 128 << 10},
-		Request: sdk.StartRequest{Model: "chat"},
-	})
+	assembly.terminal.Client = client
+	return tui.Run(ctx, os.Stdin, os.Stdout, assembly.terminal)
 }
 
 type environmentCredential string

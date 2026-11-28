@@ -40,7 +40,13 @@ func (a *app) loadSession(index int, id sdk.SessionID) {
 		a.post(target, historyReply{err: err})
 		return
 	}
-	if !a.post(target, historyReply{session: session, lines: messageLines(snapshot.Messages)}) {
+	lines := messageLines(snapshot.Messages)
+	if snapshot.Version != 0 {
+		if turn, err := session.ReadTurn(ctx, snapshot.Version); err == nil {
+			lines = withRunOutcome(lines, turn.Outcome, nil)
+		}
+	}
+	if !a.post(target, historyReply{session: session, lines: lines}) {
 		return
 	}
 	p, err := session.InspectPending(ctx)

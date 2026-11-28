@@ -69,7 +69,7 @@ type operation struct {
 	previewBytes    int
 	truncated       bool
 	interrupted     bool
-	tool            string
+	tools           []sdk.ToolEvent
 }
 
 type target struct {
@@ -245,7 +245,8 @@ func (a *app) apply(n notification) {
 		}
 		var outcome sdk.RunOutcome
 		if value.turn != nil {
-			v.history = historyTail(v.history, messageLines(value.turn.Messages))
+			lines := withRunOutcome(messageLines(value.turn.Messages), value.turn.Outcome, nil)
+			v.history = historyTail(v.history, lines)
 			outcome = value.turn.Outcome
 		} else {
 			v.history = historyTail(v.history, op.finalLines)
@@ -404,8 +405,8 @@ func (a *app) finish(target target, v *view, reply waitReply) {
 	}
 	op.terminal = &reply.result
 	op.saveReady = true
-	op.finalLines = messageLines(reply.result.Messages)
-	op.preview, op.interrupted, op.truncated, op.tool = nil, false, false, ""
+	op.finalLines = withRunOutcome(messageLines(reply.result.Messages), reply.result.Outcome, reply.result.Stop)
+	op.preview, op.interrupted, op.truncated, op.tools = nil, false, false, nil
 	if op.observeCancel != nil {
 		op.observeCancel()
 	}

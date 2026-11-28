@@ -172,17 +172,18 @@ func TestPTYCancelAdmissionRace(t *testing.T) {
 	})
 }
 
-type interruptAfterPreview struct {
+type interruptAfterEvent struct {
 	sdk.EventStream
-	preview bool
+	kind    sdk.EventKind
+	reached bool
 }
 
-func (i *interruptAfterPreview) Recv() (sdk.Event, error) {
-	if i.preview {
+func (i *interruptAfterEvent) Recv() (sdk.Event, error) {
+	if i.reached {
 		return sdk.Event{}, sdk.ErrObserveOverflow
 	}
 	event, err := i.EventStream.Recv()
-	i.preview = event.Kind == sdk.EventTextDelta
+	i.reached = event.Kind == i.kind
 	return event, err
 }
 
@@ -194,7 +195,7 @@ func TestPTYObservationAndCommit(t *testing.T) {
 	r.app.services.observe = func(run *sdk.Run, ctx context.Context) (sdk.EventStream, error) {
 		stream, err := observe(run, ctx)
 		if err == nil && firstObservation.CompareAndSwap(false, true) {
-			return &interruptAfterPreview{EventStream: stream}, nil
+			return &interruptAfterEvent{EventStream: stream, kind: sdk.EventTextDelta}, nil
 		}
 		return stream, err
 	}
@@ -239,4 +240,26 @@ func TestPTYObservationAndCommit(t *testing.T) {
 		t.Fatal("incorrect observation or history retry counts")
 	}
 	r.noDispatch()
+}
+
+func TestPTYToolObservationInterrupt(t *testing.T) {
+	r := newRig(t, 2, 1, 3*time.Second)
+	observe := r.app.services.observe
+	r.app.services.observe = func(run *sdk.Run, ctx context.Context) (sdk.EventStream, error) {
+		stream, err := observe(run, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &interruptAfterEvent{EventStream: stream, kind: sdk.EventToolDispatched}, nil
+	}
+	r.launch()
+	r.holdA()
+	r.expect("工具 · slow [c1] · 执行中", "观察中断，等待结果")
+	r.saved(0, 0)
+	r.finishA()
+	final := r.expect("[甲 · 已完成]", "工具 · slow [c1] · 已完成", "a-done")
+	if strings.Count(final, "工具 · slow") != 1 || strings.Contains(final, "观察中断") || strings.Contains(final, "执行中") {
+		t.Fatalf("confirmed tool result did not replace the preview: %s", final)
+	}
+	r.saved(0, 1)
 }
