@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"time"
@@ -33,14 +34,22 @@ func (a *app) terminal(in, out *os.File) (err error) {
 	if _, err := io.WriteString(out, "\x1b[?1049h\x1b[?7l"); err != nil {
 		return err
 	}
-	defer io.WriteString(out, "\x1b[?7h\x1b[?1049l")
+	defer func() {
+		_, _ = io.WriteString(out, "\x1b[?7h\x1b[?1049l")
+		for i, unsent := range a.unsent {
+			if unsent {
+				_, _ = fmt.Fprintf(out, "%s · 未发送\r\n", plain(string(a.cfg.Sessions[i])))
+			}
+		}
+	}()
 	ctx, cancel := context.WithCancel(a.ctx)
 	defer cancel()
 	a.ctx = ctx
 	keys := readKeys(ctx, in)
+	a.loadSessions()
 	for {
-		_, rows, _ := term.GetSize(int(out.Fd()))
-		if _, err := io.WriteString(out, a.frame(rows)); err != nil {
+		columns, rows, _ := term.GetSize(int(out.Fd()))
+		if _, err := io.WriteString(out, a.frame(rows, columns)); err != nil {
 			return err
 		}
 		select {
@@ -48,6 +57,7 @@ func (a *app) terminal(in, out *os.File) (err error) {
 			return nil
 		case key, ok := <-keys:
 			if !ok || key == '\x04' || key == '\x03' {
+				a.shutdown()
 				return nil
 			}
 			a.key(key)

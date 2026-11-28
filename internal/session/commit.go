@@ -20,17 +20,14 @@ func (s *Store) PrepareCommit(idx Index, id contract.RunID, result *contract.Res
 	if err != nil {
 		return Turn{}, false, err
 	}
-	turn, err := s.readTurn(id)
+	turn, err := s.ReadSealed(idx, id)
 	if err == nil {
-		if turn.Version != idx.Version+1 || turn.RequestDigest != pending.RequestDigest || !validTurn(pending, turn.Outcome, turn.Messages) {
-			return Turn{}, false, ErrStorage
-		}
 		return turn, false, matchResult(turn.Receipt, result)
 	}
 	if !errors.Is(err, os.ErrNotExist) || result == nil {
 		return Turn{}, false, err
 	}
-	if result.RunID != id || !validTurn(pending, result.Outcome, result.Messages) {
+	if !ValidResult(pending, *result) {
 		return Turn{}, false, ErrContent
 	}
 	digest, err := resultDigest(result.Outcome, result.Messages)
@@ -42,6 +39,22 @@ func (s *Store) PrepareCommit(idx Index, id contract.RunID, result *contract.Res
 		Scope:   s.scope, RequestDigest: pending.RequestDigest, Outcome: result.Outcome, Messages: result.Messages,
 	}
 	return turn, false, s.write(s.turnPath(id), turn)
+}
+
+// ReadSealed validates a pending delta without syncing it or publishing its receipt.
+func (s *Store) ReadSealed(idx Index, id contract.RunID) (Turn, error) {
+	pending, err := idx.Awaiting(id)
+	if err != nil {
+		return Turn{}, err
+	}
+	turn, err := s.readTurn(id)
+	if err != nil {
+		return Turn{}, err
+	}
+	if turn.Version != idx.Version+1 || turn.RequestDigest != pending.RequestDigest || !validTurn(pending, turn.Outcome, turn.Messages) {
+		return Turn{}, ErrStorage
+	}
+	return turn, nil
 }
 
 // Publish advances the visible index to include an already sealed turn.
@@ -78,6 +91,11 @@ func matchResult(receipt Receipt, result *contract.Result) error {
 		return ErrContent
 	}
 	return nil
+}
+
+// ValidResult checks that an original terminal result can supply the pending turn.
+func ValidResult(pending Pending, result contract.Result) bool {
+	return result.RunID == pending.Request.ID && validTurn(pending, result.Outcome, result.Messages)
 }
 
 func validTurn(pending Pending, outcome contract.RunOutcome, messages []contract.Message) bool {

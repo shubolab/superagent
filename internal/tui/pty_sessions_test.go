@@ -117,7 +117,7 @@ func TestPTYSingleSlotHandoff(t *testing.T) {
 	t.Run("queue then start before A saves", func(t *testing.T) {
 		r := newRig(t, 1, 1, 3*time.Second)
 		saveGate := make(chan struct{})
-		first := r.app.views[0].session
+		first := r.sessions[0]
 		commit := r.app.services.commit
 		r.app.services.commit = func(s *sdk.Session, ctx context.Context, id sdk.RunID) (sdk.SessionCommit, error) {
 			if s == first && !pause(ctx, saveGate) {
@@ -133,7 +133,7 @@ func TestPTYSingleSlotHandoff(t *testing.T) {
 		r.expect("[甲 · 运行中]", "乙 · 排队中", "工具 · slow")
 		r.expect("[乙 · 排队中]")
 		r.noDispatch()
-		if pending, err := r.app.views[1].session.PendingRun(r.ctx); err != nil || pending != "" {
+		if pending, err := r.sessions[1].PendingRun(r.ctx); err != nil || pending != "" {
 			t.Fatalf("queue created a durable reservation: %q %v", pending, err)
 		}
 		r.finishA()

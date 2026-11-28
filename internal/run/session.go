@@ -14,13 +14,15 @@ import (
 	"github.com/shubolab/superagent/internal/schedule"
 )
 
+const sessionAuthority = ".session-authority"
+
 // SessionBinding identifies the retained local checkpoint store and assembly.
 func (r *Runner) SessionBinding(ctx context.Context) (string, error) {
 	if r.recovery == nil {
 		return "", contract.ErrRecoveryUnavailable
 	}
 	dir := filepath.Clean(r.recovery.Directory)
-	path := filepath.Join(dir, ".session-authority")
+	path := filepath.Join(dir, sessionAuthority)
 	lock, err := durable.LockContext(ctx, path)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", contract.ErrRecoveryStorage, err)
@@ -37,6 +39,22 @@ func (r *Runner) SessionBinding(ctx context.Context) (string, error) {
 	}
 	if err := durable.SyncDirectory(dir); err != nil {
 		return "", fmt.Errorf("%w: %w", contract.ErrRecoveryStorage, err)
+	}
+	return durable.Digest([3]string{dir, id, r.recovery.BindingVersion})
+}
+
+// InspectSessionBinding reads the existing authority without creating or syncing it.
+func (r *Runner) InspectSessionBinding(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if r.recovery == nil {
+		return "", contract.ErrRecoveryUnavailable
+	}
+	dir := filepath.Clean(r.recovery.Directory)
+	var id string
+	if err := durable.Read(filepath.Join(dir, sessionAuthority), &id); err != nil || id == "" {
+		return "", contract.ErrRecoveryBinding
 	}
 	return durable.Digest([3]string{dir, id, r.recovery.BindingVersion})
 }

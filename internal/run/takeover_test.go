@@ -52,7 +52,7 @@ func TestSharedOwnershipTransactions(t *testing.T) {
 			allowed:  map[contract.SubjectID]map[contract.ModelRef]struct{}{subject: {"chat": {}}},
 		}
 	}
-	if _, _, err := candidate("new", "v1").acquireTakeover(t.Context(), path, id); !errors.Is(err, contract.ErrRecoveryBusy) {
+	if _, _, err := candidate("new", "v1").acquireBoundTakeover(t.Context(), path, id, ""); !errors.Is(err, contract.ErrRecoveryBusy) {
 		t.Fatalf("active lease: %v", err)
 	}
 	offset.Store(int64(duration))
@@ -69,12 +69,12 @@ func TestSharedOwnershipTransactions(t *testing.T) {
 	if err := old.Admit(t.Context(), modelRequest); !errors.Is(err, contract.ErrRecoveryOwnershipLost) {
 		t.Fatalf("expired owner admitted without successor: %v", err)
 	}
-	if _, _, err := candidate("new", "v2").acquireTakeover(t.Context(), path, id); !errors.Is(err, contract.ErrRecoveryBinding) {
+	if _, _, err := candidate("new", "v2").acquireBoundTakeover(t.Context(), path, id, ""); !errors.Is(err, contract.ErrRecoveryBinding) {
 		t.Fatalf("wrong binding: %v", err)
 	}
 	wrong := id
 	wrong.Subject = "other"
-	if _, _, err := candidate("new", "v1").acquireTakeover(t.Context(), path, wrong); !errors.Is(err, contract.ErrRecoveryStorage) {
+	if _, _, err := candidate("new", "v1").acquireBoundTakeover(t.Context(), path, wrong, ""); !errors.Is(err, contract.ErrRecoveryStorage) {
 		t.Fatalf("wrong subject: %v", err)
 	}
 	var wg sync.WaitGroup
@@ -83,7 +83,7 @@ func TestSharedOwnershipTransactions(t *testing.T) {
 		wg.Add(1)
 		go func(instance string) {
 			defer wg.Done()
-			snapshot, owner, err := candidate(instance, "v1").acquireTakeover(t.Context(), path, id)
+			snapshot, owner, err := candidate(instance, "v1").acquireBoundTakeover(t.Context(), path, id, "")
 			if err != nil && !errors.Is(err, contract.ErrRecoveryBusy) {
 				t.Errorf("candidate %s: %v", instance, err)
 			}
@@ -140,7 +140,7 @@ func TestSharedOwnershipTransactions(t *testing.T) {
 		t.Fatal(err)
 	}
 	offset.Store(int64(duration * 2))
-	stopped, _, err := candidate("third", "v1").acquireTakeover(t.Context(), path, id)
+	stopped, _, err := candidate("third", "v1").acquireBoundTakeover(t.Context(), path, id, "")
 	if err != nil || stopped.Owner.Epoch != 3 || stopped.Stop == nil || stopped.Stop.Code != contract.StopCancelled {
 		t.Fatalf("accepted cancellation was lost: %+v (%v)", stopped.Stop, err)
 	}

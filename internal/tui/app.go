@@ -4,7 +4,6 @@ package tui
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -21,7 +20,9 @@ type Config struct {
 }
 
 type services struct {
+	open    func(*sdk.Client, context.Context, sdk.SessionID, sdk.SessionConfig) (*sdk.Session, error)
 	start   func(*sdk.Session, context.Context, sdk.StartRequest) <-chan sdk.StartUpdate
+	resume  func(*sdk.Session, context.Context, sdk.RunID) <-chan sdk.StartUpdate
 	observe func(*sdk.Run, context.Context) (sdk.EventStream, error)
 	wait    func(*sdk.Run, context.Context) (sdk.Result, error)
 	cancel  func(*sdk.Run, context.Context) error
@@ -35,6 +36,8 @@ type app struct {
 	inbox    chan notification
 	views    [2]view
 	selected int
+	exiting  bool
+	unsent   [2]bool
 }
 
 type view struct {
@@ -42,6 +45,7 @@ type view struct {
 	draft   []rune
 	history []string
 	status  string
+	ready   bool
 	op      *operation
 }
 
@@ -56,6 +60,8 @@ type operation struct {
 	unknown         bool
 	waiting         bool
 	saving          bool
+	saveReady       bool
+	recovered       bool
 	terminal        *sdk.Result
 	finalLines      []string
 	seq             uint64
@@ -83,6 +89,7 @@ type waitReply struct {
 }
 type saveReply struct {
 	receipt sdk.SessionCommit
+	turn    *sdk.SessionTurn
 	err     error
 }
 type cancelReply struct{ err error }
@@ -93,25 +100,15 @@ func open(ctx context.Context, cfg Config) (*app, error) {
 	}
 	a := &app{
 		cfg: cfg, ctx: ctx, inbox: make(chan notification, 64),
-		services: services{(*sdk.Session).StartWithProgress, (*sdk.Run).Observe, (*sdk.Run).Wait, (*sdk.Run).Cancel, (*sdk.Session).CommitRun},
+		services: services{
+			open: (*sdk.Client).OpenSession, start: (*sdk.Session).StartWithProgress,
+			resume:  (*sdk.Session).ResumeAdmittedWithProgress,
+			observe: (*sdk.Run).Observe, wait: (*sdk.Run).Wait, cancel: (*sdk.Run).Cancel,
+			commit: (*sdk.Session).CommitPendingResult,
+		},
 	}
-	for i, id := range cfg.Sessions {
-		session, err := cfg.Client.OpenSession(ctx, id, cfg.Store)
-		if err != nil {
-			return nil, fmt.Errorf("打开会话 %q: %w", id, err)
-		}
-		snapshot, err := session.Snapshot(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("读取会话 %q: %w", id, err)
-		}
-		v := &a.views[i]
-		*v = view{session: session, history: messageLines(snapshot.Messages), status: "空闲"}
-		if pending, err := session.PendingRun(ctx); err != nil {
-			return nil, err
-		} else if pending != "" {
-			v.status = "结果待核对"
-			v.op = &operation{id: pending, unknown: true, run: cfg.Client.Run(pending)}
-		}
+	for i := range a.views {
+		a.views[i].status = "读取中"
 	}
 	return a, nil
 }
@@ -126,20 +123,26 @@ func (a *app) key(key rune) {
 	case '\x1b':
 		a.stop(v)
 	case '\b', '\x7f':
-		if len(v.draft) > 0 && v.op == nil {
+		if v.ready && len(v.draft) > 0 && v.op == nil {
 			v.draft = v.draft[:len(v.draft)-1]
 		}
 	default:
-		if v.op == nil && len(v.draft) < 4096 && unicode.IsPrint(key) {
+		if v.ready && v.op == nil && len(v.draft) < 4096 && unicode.IsPrint(key) {
 			v.draft = append(v.draft, key)
 		}
 	}
 }
 
 func (a *app) submit(v *view) {
+	if !v.ready {
+		return
+	}
 	if v.op != nil {
-		if v.op.terminal != nil && !v.op.saving && v.status == "待保存" {
+		switch {
+		case v.op.saveReady && !v.op.saving && v.status == "待保存":
 			a.save(target{a.selected, v.op.id}, v)
+		case v.status == "可继续" || v.status == "原进程占用":
+			a.resume(v)
 		}
 		return
 	}
@@ -166,7 +169,7 @@ func (a *app) submit(v *view) {
 
 func (a *app) stop(v *view) {
 	op := v.op
-	if op == nil || op.terminal != nil || op.cancelRequested {
+	if op == nil || op.saveReady || op.cancelRequested || (op.startCancel == nil && op.run == nil) {
 		return
 	}
 	op.cancelRequested = true
@@ -196,6 +199,18 @@ func (a *app) post(target target, value any) bool {
 
 func (a *app) apply(n notification) {
 	v := &a.views[n.index]
+	switch value := n.value.(type) {
+	case historyReply:
+		if value.err != nil {
+			v.status = "历史不可用"
+		} else {
+			v.session, v.history, v.status = value.session, value.lines, "核对中"
+		}
+		return
+	case pendingReply:
+		a.showPending(n.index, v, value)
+		return
+	}
 	op := v.op
 	if op == nil || op.id != n.id {
 		return
@@ -217,15 +232,26 @@ func (a *app) apply(n notification) {
 	case waitReply:
 		a.finish(n.target, v, value)
 	case saveReply:
-		if !op.saving || op.terminal == nil {
+		if !op.saving {
+			return
+		}
+		if errors.Is(value.err, sdk.ErrSessionResultUnavailable) || errors.Is(value.err, sdk.ErrSessionContent) {
+			op.saving, op.saveReady, v.status = false, false, "待核对"
 			return
 		}
 		if value.err != nil || value.receipt.RunID != op.id {
 			op.saving, v.status = false, "待保存"
 			return
 		}
-		v.history = historyTail(v.history, op.finalLines)
-		v.status, v.op = outcomeLabel(op.terminal.Outcome), nil
+		var outcome sdk.RunOutcome
+		if value.turn != nil {
+			v.history = historyTail(v.history, messageLines(value.turn.Messages))
+			outcome = value.turn.Outcome
+		} else {
+			v.history = historyTail(v.history, op.finalLines)
+			outcome = op.terminal.Outcome
+		}
+		v.status, v.op = outcomeLabel(outcome), nil
 	case cancelReply:
 		if op.terminal == nil {
 			if value.err != nil {
@@ -243,6 +269,10 @@ func (a *app) apply(n notification) {
 
 func (a *app) admission(target target, v *view, update sdk.StartUpdate) {
 	op := v.op
+	if op.recovered {
+		a.resumeUpdate(target, v, update)
+		return
+	}
 	if update.Phase != sdk.StartResolved {
 		if !op.cancelRequested {
 			switch update.Phase {
@@ -266,6 +296,9 @@ func (a *app) admission(target target, v *view, update sdk.StartUpdate) {
 			return
 		}
 		v.draft, v.op = []rune(op.input), nil
+		if a.exiting && errors.Is(update.Err, context.Canceled) {
+			a.unsent[target.index] = true
+		}
 		switch {
 		case errors.Is(update.Err, sdk.ErrScheduleQueueFull):
 			v.status = "队列已满"
@@ -287,6 +320,9 @@ func (a *app) admission(target target, v *view, update sdk.StartUpdate) {
 	if op.cancelRequested {
 		v.status = "取消中"
 		a.cancelRun(target, op)
+	}
+	if a.exiting {
+		return
 	}
 	a.observeRun(target, op)
 	a.waitRun(target, op)
@@ -367,6 +403,7 @@ func (a *app) finish(target target, v *view, reply waitReply) {
 		return
 	}
 	op.terminal = &reply.result
+	op.saveReady = true
 	op.finalLines = messageLines(reply.result.Messages)
 	op.preview, op.interrupted, op.truncated, op.tool = nil, false, false, ""
 	if op.observeCancel != nil {
@@ -378,11 +415,17 @@ func (a *app) finish(target target, v *view, reply waitReply) {
 func (a *app) save(target target, v *view) {
 	v.op.saving, v.status = true, "保存中"
 	session := v.session
+	readTurn := v.op.terminal == nil
 	go func() {
 		ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
 		defer cancel()
 		receipt, err := a.services.commit(session, ctx, target.id)
-		a.post(target, saveReply{receipt, err})
+		reply := saveReply{receipt: receipt, err: err}
+		if err == nil && readTurn {
+			turn, err := session.ReadTurn(ctx, receipt.Version)
+			reply.turn, reply.err = &turn, err
+		}
+		a.post(target, reply)
 	}()
 }
 

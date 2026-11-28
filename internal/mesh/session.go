@@ -11,7 +11,9 @@ import (
 type SessionRunner interface {
 	RunnerEndpoint
 	Recover(context.Context, contract.SubjectID, contract.RunID) (contract.RunID, error)
+	RecoverSession(context.Context, contract.SubjectID, contract.RunID, string) (contract.RunID, error)
 	SessionBinding(context.Context) (string, error)
+	InspectSessionBinding(context.Context) (string, error)
 	SessionRequestDigest(contract.StartRequest) (string, error)
 	SessionCheckpoint(contract.SubjectID, contract.RunID, string) (contract.SessionRunCheckpoint, error)
 	SessionScheduler() *schedule.Scheduler

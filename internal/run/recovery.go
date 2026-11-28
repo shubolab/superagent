@@ -330,6 +330,18 @@ func (r *Runner) startRecoverable(ctx context.Context, subject contract.SubjectI
 }
 
 func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id contract.RunID) (contract.RunID, error) {
+	return r.recover(ctx, subject, id, "")
+}
+
+// RecoverSession binds the recovery transaction to the original session request.
+func (r *Runner) RecoverSession(ctx context.Context, subject contract.SubjectID, id contract.RunID, digest string) (contract.RunID, error) {
+	if digest == "" {
+		return "", contract.ErrInvalidRequest
+	}
+	return r.recover(ctx, subject, id, digest)
+}
+
+func (r *Runner) recover(ctx context.Context, subject contract.SubjectID, id contract.RunID, digest string) (contract.RunID, error) {
 	if r.recovery == nil {
 		return "", contract.ErrRecoveryUnavailable
 	}
@@ -353,6 +365,10 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 			return "", contract.ErrRunNotFound
 		}
 		s.mu.Lock()
+		if digest != "" && digest != s.checkpoint.data.RequestDigest {
+			s.mu.Unlock()
+			return "", contract.ErrStartConflict
+		}
 		current := s.checkpoint.lease
 		if current == nil || !s.finishedAt.IsZero() {
 			s.mu.Unlock()
@@ -382,6 +398,9 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 	if err != nil {
 		return "", err
 	}
+	if digest != "" && digest != record.RequestDigest {
+		return "", contract.ErrStartConflict
+	}
 	var lock *os.File
 	var shared *lease
 	var permit *schedule.Permit
@@ -394,11 +413,14 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 			if r.recovery.Takeover == nil {
 				return "", contract.ErrRecoveryUnavailable
 			}
-			record, shared, err = r.acquireTakeover(ctx, path, identity)
+			record, shared, err = r.acquireBoundTakeover(ctx, path, identity, digest)
 		} else {
 			lock, err = recoveryLock(path)
 			if err == nil {
 				record, err = readCheckpoint(path, identity)
+				if err == nil && digest != "" && digest != record.RequestDigest {
+					err = contract.ErrStartConflict
+				}
 			}
 		}
 		if err != nil {

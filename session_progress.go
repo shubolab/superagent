@@ -25,26 +25,34 @@ type StartUpdate struct {
 // StartWithProgress freezes the input before returning and closes its bounded stream
 // after the final reply. A slow reader does not delay admission.
 func (s *Session) StartWithProgress(ctx context.Context, req StartRequest) <-chan StartUpdate {
-	updates := make(chan StartUpdate, 3)
-	finish := func(run *Run, err error) {
-		updates <- StartUpdate{RunID: req.ID, Phase: StartResolved, Run: run, Err: err}
-		close(updates)
-	}
 	if !validSessionStart(req) {
-		finish(nil, ErrInvalidRequest)
-		return updates
+		return failedStartUpdates(req.ID, ErrInvalidRequest)
 	}
 	req.Recoverable = true
 	frozen, digest, err := freezeScheduledRequest(req)
 	if err != nil {
-		finish(nil, err)
-		return updates
+		return failedStartUpdates(req.ID, err)
 	}
+	return startUpdates(req.ID, func(report func(schedule.AdmissionPhase)) (*Run, error) {
+		return s.startSession(ctx, frozen, digest, report)
+	})
+}
+
+func failedStartUpdates(id RunID, err error) <-chan StartUpdate {
+	updates := make(chan StartUpdate, 1)
+	updates <- StartUpdate{RunID: id, Phase: StartResolved, Err: err}
+	close(updates)
+	return updates
+}
+
+func startUpdates(id RunID, work func(func(schedule.AdmissionPhase)) (*Run, error)) <-chan StartUpdate {
+	updates := make(chan StartUpdate, 3)
 	go func() {
-		run, err := s.startSession(ctx, frozen, digest, func(phase schedule.AdmissionPhase) {
-			updates <- StartUpdate{RunID: frozen.ID, Phase: StartPhase(phase)}
+		defer close(updates)
+		run, err := work(func(phase schedule.AdmissionPhase) {
+			updates <- StartUpdate{RunID: id, Phase: StartPhase(phase)}
 		})
-		finish(run, err)
+		updates <- StartUpdate{RunID: id, Phase: StartResolved, Run: run, Err: err}
 	}()
 	return updates
 }

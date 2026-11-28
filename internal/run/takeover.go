@@ -81,10 +81,13 @@ func (l *lease) write(c *checkpoint) error {
 	return err
 }
 
-func (r *Runner) acquireTakeover(ctx context.Context, path string, identity runIdentity) (checkpoint, *lease, error) {
+func (r *Runner) acquireBoundTakeover(ctx context.Context, path string, identity runIdentity, digest string) (checkpoint, *lease, error) {
 	l := &lease{path: path, id: identity, clock: r.leaseClock}
 	var result checkpoint
 	err := l.transact(ctx, func(c *checkpoint, now time.Time) error {
+		if digest != "" && digest != c.RequestDigest {
+			return contract.ErrStartConflict
+		}
 		if !c.Request.Takeover || c.Owner == nil {
 			return contract.ErrRecoveryUnavailable
 		}

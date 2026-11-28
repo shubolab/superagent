@@ -189,7 +189,7 @@ func (i *interruptAfterPreview) Recv() (sdk.Event, error) {
 func TestPTYObservationAndCommit(t *testing.T) {
 	r := newRig(t, 2, 1, 3*time.Second)
 	observe, commit := r.app.services.observe, r.app.services.commit
-	first := r.app.views[0].session
+	first := r.sessions[0]
 	var firstObservation, failedSave atomic.Bool
 	r.app.services.observe = func(run *sdk.Run, ctx context.Context) (sdk.EventStream, error) {
 		stream, err := observe(run, ctx)

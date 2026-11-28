@@ -114,15 +114,16 @@ func (a *activity) count(kind string, id sdk.RunID) int {
 }
 
 type rig struct {
-	t       *testing.T
-	ctx     context.Context
-	app     *app
-	calls   chan modelCall
-	tool    controlledTool
-	audit   *activity
-	screens *screenLog
-	master  *os.File
-	next    int
+	t        *testing.T
+	ctx      context.Context
+	app      *app
+	sessions [2]*sdk.Session
+	calls    chan modelCall
+	tool     controlledTool
+	audit    *activity
+	screens  *screenLog
+	master   *os.File
+	next     int
 }
 
 func newRig(t *testing.T, active, queued int, queueWait time.Duration) *rig {
@@ -169,6 +170,19 @@ func newRig(t *testing.T, active, queued int, queueWait time.Duration) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var sessions [2]*sdk.Session
+	for i, id := range a.cfg.Sessions {
+		sessions[i], err = client.OpenSession(ctx, id, a.cfg.Store)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.services.open = func(_ *sdk.Client, _ context.Context, id sdk.SessionID, _ sdk.SessionConfig) (*sdk.Session, error) {
+		if id == a.cfg.Sessions[0] {
+			return sessions[0], nil
+		}
+		return sessions[1], nil
+	}
 	audit := &activity{counts: make(map[string]map[sdk.RunID]int)}
 	a.services.start = func(s *sdk.Session, ctx context.Context, req sdk.StartRequest) <-chan sdk.StartUpdate {
 		audit.record("start", req.ID)
@@ -184,9 +198,9 @@ func newRig(t *testing.T, active, queued int, queueWait time.Duration) *rig {
 	}
 	a.services.commit = func(s *sdk.Session, ctx context.Context, id sdk.RunID) (sdk.SessionCommit, error) {
 		audit.record("commit", id)
-		return s.CommitRun(ctx, id)
+		return s.CommitPendingResult(ctx, id)
 	}
-	return &rig{t: t, ctx: ctx, app: a, calls: calls, tool: slow, audit: audit}
+	return &rig{t: t, ctx: ctx, app: a, sessions: sessions, calls: calls, tool: slow, audit: audit}
 }
 
 func ptr[T any](value T) *T { return &value }
@@ -198,6 +212,7 @@ type screenLog struct {
 	mu     sync.Mutex
 	frames []string
 	notify chan struct{}
+	tail   string
 }
 
 func (l *screenLog) read(master io.Reader) {
@@ -205,6 +220,10 @@ func (l *screenLog) read(master io.Reader) {
 	var pending string
 	for {
 		n, err := master.Read(chunk[:])
+		l.mu.Lock()
+		l.tail += string(chunk[:n])
+		l.tail = l.tail[max(0, len(l.tail)-1024):]
+		l.mu.Unlock()
 		pending += string(chunk[:n])
 		for {
 			start := strings.Index(pending, frameStart)
@@ -348,7 +367,7 @@ func (r *rig) finishA() {
 
 func (r *rig) saved(index int, version uint64) {
 	r.t.Helper()
-	snapshot, err := r.app.views[index].session.Snapshot(r.ctx)
+	snapshot, err := r.sessions[index].Snapshot(r.ctx)
 	if err != nil || snapshot.Version != version {
 		r.t.Fatalf("session %d version = %d, want %d (%v)", index, snapshot.Version, version, err)
 	}

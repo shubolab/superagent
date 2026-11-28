@@ -56,7 +56,7 @@ func (op *operation) updatePreview(step uint32, text string, replace bool) {
 	op.previewBytes += len(part)
 }
 
-func (a *app) frame(rows int) string {
+func (a *app) frame(rows, columns int) string {
 	if rows < 6 {
 		rows = 24
 	}
@@ -98,6 +98,17 @@ func (a *app) frame(rows int) string {
 				lines = append(lines, "观察中断，等待结果")
 			}
 		}
+		if op.recovered && op.id != "" {
+			id := "RunID " + string(op.id)
+			width := max(16, columns)
+			if columns == 0 {
+				width = 80
+			}
+			for len(id) > width {
+				lines, id = append(lines, id[:width]), id[width:]
+			}
+			lines = append(lines, id)
+		}
 	}
 	visible := max(1, rows-4)
 	for _, line := range lines[max(0, len(lines)-visible):] {
@@ -109,6 +120,8 @@ func (a *app) frame(rows int) string {
 	out.WriteString("\x1b7\r\n")
 	if v.status == "待保存" {
 		out.WriteString("Tab 切换   Enter 重试保存   Ctrl+D 退出")
+	} else if v.status == "可继续" || v.status == "原进程占用" {
+		out.WriteString("Tab 切换   Enter 继续原 Run   Ctrl+D 退出")
 	} else {
 		out.WriteString("Tab 切换   Enter 发送   Esc 取消当前   Ctrl+D 退出")
 	}
