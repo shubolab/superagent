@@ -337,7 +337,7 @@ func (p *remoteFaultProxy) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reply.Body.Close()
 	data, err := io.ReadAll(reply.Body)
-	if invoke && reply.StatusCode == http.StatusOK && err == nil && p.scenario != "disconnect-before-journal" {
+	if invoke && reply.StatusCode == http.StatusOK && err == nil && p.scenario != "disconnect-before-journal" && p.scenario != "stage-b-acceptance" {
 		p.dropped.Add(1)
 		receipts, _ := filepath.Glob(filepath.Join(p.root, "receipts", "*.receipt"))
 		if len(receipts) == 1 {
@@ -408,6 +408,19 @@ func dropRemoteReply(w http.ResponseWriter, body []byte) {
 
 func remoteRunClient(t *testing.T, root, endpoint string, identity RemoteToolIdentity, model ModelProvider, window time.Duration, takeover bool) *Client {
 	t.Helper()
+	m, err := NewMesh(remoteRunConfig(t, root, endpoint, identity, model, window, takeover))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(m, "runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+func remoteRunConfig(t *testing.T, root, endpoint string, identity RemoteToolIdentity, model ModelProvider, window time.Duration, takeover bool) MeshConfig {
+	t.Helper()
 	tool, err := NewRemoteTool(RemoteToolClientConfig{Endpoint: endpoint, Identity: identity, TLS: loadRemoteTLS(t, root, "owner")})
 	if err != nil {
 		t.Fatal(err)
@@ -422,7 +435,7 @@ func remoteRunClient(t *testing.T, root, endpoint string, identity RemoteToolIde
 	if identity.EvidenceRule != "" {
 		prepare = PrepareEvidenceAppend
 	}
-	mesh, err := NewMesh(MeshConfig{
+	return MeshConfig{
 		LocalRunners: map[RunnerRef]RunnerConfig{"runner": {
 			AllowedModels: map[SubjectID][]ModelRef{"owner": {"model"}},
 			AllowedTools:  map[SubjectID]map[ToolRef]ToolPermission{"owner": {"write": {}}},
@@ -436,15 +449,7 @@ func remoteRunClient(t *testing.T, root, endpoint string, identity RemoteToolIde
 			Spec: ToolSpec{InputSchema: json.RawMessage(`{"type":"object"}`), Limits: ToolLimits{MaxResultBytes: 1024, MaxScanBytes: 8}},
 		}},
 		ResolveCaller: func(context.Context) (SubjectID, error) { return "owner", nil },
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	client, err := NewClient(mesh, "runner")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return client
 }
 
 func TestRemoteToolRecoveryAcrossRealConnection(t *testing.T) {

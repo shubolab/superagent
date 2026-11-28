@@ -56,9 +56,7 @@ type item struct {
 }
 
 func NewLocal(cfg Config) (*Local, error) {
-	if cfg.Directory == "" || !filepath.IsAbs(cfg.Directory) || cfg.MaxArtifactBytes == 0 ||
-		cfg.MaxStoredBytes < cfg.MaxArtifactBytes || cfg.MaxArtifactBytes > math.MaxInt64 ||
-		cfg.MaxPageBytes == 0 || cfg.MaxPageBytes > contract.ArtifactMaxBlockBytes || cfg.MaxArtifacts <= 0 || cfg.Retention <= 0 {
+	if !validConfig(cfg) {
 		return nil, contract.ErrInvalidConfiguration
 	}
 	dir, err := os.MkdirTemp(cfg.Directory, "superagent-artifacts-")
@@ -66,6 +64,12 @@ func NewLocal(cfg Config) (*Local, error) {
 		return nil, err
 	}
 	return &Local{cfg: cfg, path: dir, calls: make(map[callID]*item), files: make(map[string]*item)}, nil
+}
+
+func validConfig(cfg Config) bool {
+	return filepath.IsAbs(cfg.Directory) && cfg.MaxArtifactBytes > 0 && cfg.MaxStoredBytes >= cfg.MaxArtifactBytes &&
+		cfg.MaxArtifactBytes <= math.MaxInt64 && cfg.MaxPageBytes > 0 && cfg.MaxPageBytes <= contract.ArtifactMaxBlockBytes &&
+		cfg.MaxArtifacts > 0 && cfg.Retention > 0
 }
 
 func (s *Local) Begin(ctx context.Context, scope contract.ArtifactCall) (uint64, error) {

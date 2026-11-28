@@ -251,7 +251,11 @@ func TestLocalReceiptJournalDeduplicates(t *testing.T) {
 
 var retainedPayload = strings.Repeat("stable payload across local processes\n", 128)
 
-type retainedFixtureStore struct{ root string }
+type retainedFixtureStore struct {
+	root      string
+	pageBytes uint64
+	now       func() time.Time
+}
 
 func (retainedFixtureStore) RetainsAcrossRestart() bool { return true }
 func (retainedFixtureStore) Close() error               { return nil }
@@ -294,11 +298,21 @@ func (s retainedFixtureStore) path(owner ArtifactOwner, ref ArtifactRef) string 
 }
 
 func (s retainedFixtureStore) ReadArtifact(_ context.Context, owner ArtifactOwner, ref ArtifactRef, offset, max uint64) (ArtifactPage, error) {
-	data, err := os.ReadFile(s.path(owner, ref))
-	if err != nil || uint64(len(data)) != ref.SizeBytes || offset > ref.SizeBytes || max == 0 {
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	if !now().Before(ref.ExpiresAt) || offset > ref.SizeBytes || max == 0 {
 		return ArtifactPage{}, ErrArtifactUnavailable
 	}
-	end := min(ref.SizeBytes, offset+max)
+	data, err := os.ReadFile(s.path(owner, ref))
+	if err != nil || uint64(len(data)) != ref.SizeBytes {
+		return ArtifactPage{}, ErrArtifactUnavailable
+	}
+	if s.pageBytes != 0 {
+		max = min(max, s.pageBytes)
+	}
+	end := offset + min(ref.SizeBytes-offset, max)
 	return ArtifactPage{Content: data[offset:end], NextOffset: end, EOF: end == ref.SizeBytes}, nil
 }
 

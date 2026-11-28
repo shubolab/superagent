@@ -50,6 +50,33 @@ type ArtifactStore interface {
 	Close() error
 }
 
+// DurableArtifactStore validates immutable bytes before entering a short publication fence.
+type DurableArtifactStore interface {
+	TakeoverArtifactStore
+	ArtifactStoreID() string
+	CheckArtifact(context.Context, ArtifactOwner, ArtifactRef) error
+	PrepareArtifactPublication(context.Context, ArtifactCall, ArtifactRef) (func(context.Context) (uint64, error), error)
+}
+
+// ArtifactAdmission is supplied by the trusted Mesh, outside the public tool request.
+type ArtifactAdmission struct {
+	Deadline time.Time
+	Epoch    uint64
+	Key      ReceiptKey
+	Seal     func(func() error) error
+}
+
+type artifactAdmissionKey struct{}
+
+func WithArtifactAdmission(ctx context.Context, admission ArtifactAdmission) context.Context {
+	return context.WithValue(ctx, artifactAdmissionKey{}, admission)
+}
+
+func ArtifactAdmissionFrom(ctx context.Context) (ArtifactAdmission, bool) {
+	value, ok := ctx.Value(artifactAdmissionKey{}).(ArtifactAdmission)
+	return value, ok
+}
+
 var (
 	ErrArtifactUnavailable = errors.New("artifact_unavailable")
 	ErrArtifactCapacity    = errors.New("artifact_capacity")

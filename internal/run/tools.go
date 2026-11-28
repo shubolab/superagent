@@ -398,13 +398,6 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 			}
 		}
 	}
-	var raw uint64
-	if binding.Spec.NeedsArtifactOutput {
-		result, raw = a.settleArtifact(e, req, result, key)
-	} else if result.Completion != nil && len(result.Completion.Artifacts) != 0 ||
-		result.Usage != nil && result.Usage.RawOutputBytes != nil {
-		result = contract.ToolResult{}
-	}
 	if (verified && measured > 0) && result.State == contract.ToolExecutionNotExecuted {
 		result = contract.ToolResult{}
 	}
@@ -413,6 +406,18 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 			result.Usage = &contract.ToolUsage{}
 		}
 		result.Usage.ScannedBytes = &measured
+	}
+	var raw uint64
+	if binding.Spec.NeedsArtifactOutput {
+		durable := r.artifactStoreID != ""
+		if durable && key != (contract.ReceiptKey{}) && (!contract.ValidToolResult(result, req.RunID, req.CallID) || toolStatus(result) == contract.ToolStatusUnknown) {
+			// An ambiguous reply may have a durable receipt selecting the sealed object.
+			return r.reconcileTool(s, a, balance, toolIntent{Key: key, Limits: req.Limits, Path: e.Call.Path})
+		}
+		result, raw = a.settleArtifact(s.ctx, e, req, result, key, durable)
+	} else if result.Completion != nil && len(result.Completion.Artifacts) != 0 ||
+		result.Usage != nil && result.Usage.RawOutputBytes != nil {
+		result = contract.ToolResult{}
 	}
 	if key != (contract.ReceiptKey{}) && (!contract.ValidToolResult(result, req.RunID, req.CallID) || toolStatus(result) == contract.ToolStatusUnknown) {
 		return r.reconcileTool(s, a, balance, toolIntent{Key: key, Limits: req.Limits, Path: e.Call.Path})
@@ -427,11 +432,25 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	return result, ok
 }
 
-func (a *activity) settleArtifact(e mesh.EnvironmentRequest, req contract.ToolRequest, result contract.ToolResult, key contract.ReceiptKey) (contract.ToolResult, uint64) {
+func (a *activity) settleArtifact(ctx context.Context, e mesh.EnvironmentRequest, req contract.ToolRequest, result contract.ToolResult, key contract.ReceiptKey, durable bool) (contract.ToolResult, uint64) {
 	if contract.ValidToolResult(result, req.RunID, req.CallID) && result.State == contract.ToolExecutionKnown {
 		e.Artifacts = result.Completion.Artifacts
 	}
-	reply, err := a.cleanupCall(mesh.SettleArtifactOutput, e, key)
+	var reply mesh.MeshReply
+	var err error
+	if durable && len(e.Artifacts) != 0 {
+		used, fits := meterRetainedResult(&result, req.Limits)
+		if !fits {
+			a.cleanupPending = true
+			return contract.ToolResult{}, req.Limits.MaxRawOutputBytes
+		}
+		reply, err = mesh.CallReceipt(ctx, a.transport, mesh.SettleArtifactOutput, e, req, key)
+		if err == nil && reply.RawOutputBytes != used {
+			err = contract.ErrArtifactReceipt
+		}
+	} else {
+		reply, err = a.cleanupCall(mesh.SettleArtifactOutput, e, key)
+	}
 	if err != nil && (!errors.Is(err, contract.ErrArtifactReceipt) || errors.Is(err, contract.ErrArtifactCleanup)) {
 		a.cleanupPending = true
 	}

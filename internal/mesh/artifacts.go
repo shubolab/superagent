@@ -21,16 +21,62 @@ func artifactScope(e EnvironmentRequest) contract.ArtifactCall {
 	}
 }
 
-func (l *Local) artifactCall(ctx context.Context, op Operation, e EnvironmentRequest) (MeshReply, error) {
+func (l *Local) artifactCall(ctx context.Context, req MeshRequest) (MeshReply, error) {
+	e, key := req.Environment, req.ReceiptKey
 	if l.artifacts == nil || e.Call.Run != e.Run || e.Call.CallID == "" {
 		return MeshReply{}, contract.ErrArtifactUnavailable
 	}
 	scope := artifactScope(e)
-	if op == BeginArtifactOutput {
+	ctx = contract.WithArtifactAdmission(ctx, contract.ArtifactAdmission{Deadline: e.Run.Deadline, Epoch: e.Run.Epoch, Key: key})
+	if req.Operation == BeginArtifactOutput {
 		limit, err := l.artifacts.Begin(ctx, scope)
 		return MeshReply{RawOutputBytes: limit}, err
 	}
-	written, err := l.artifacts.Settle(ctx, scope, e.Artifacts)
+	restoring := req.Operation == RestoreArtifactOutput
+	store, durable := l.artifacts.(contract.DurableArtifactStore)
+	if restoring {
+		if !durable || len(e.Artifacts) != 1 || !validReceiptRoute(key, e) || key.CallID != scope.CallID || key.Tool != scope.Tool {
+			return MeshReply{}, contract.ErrAccessDenied
+		}
+		query := req
+		query.Operation = QueryReceipt
+		if err := admitComponent(ctx, query); err != nil {
+			return MeshReply{}, err
+		}
+	}
+	publish := func(ctx context.Context) (uint64, error) { return l.artifacts.Settle(ctx, scope, e.Artifacts) }
+	if durable && len(e.Artifacts) == 1 {
+		var err error
+		publish, err = store.PrepareArtifactPublication(ctx, scope, e.Artifacts[0])
+		if err != nil {
+			return MeshReply{}, err
+		}
+	}
+	if e.Run.Epoch == 0 {
+		written, err := publish(ctx)
+		return MeshReply{RawOutputBytes: written}, err
+	}
+	guard := takeoverGuard(ctx)
+	if guard == nil {
+		return MeshReply{}, contract.ErrAccessDenied
+	}
+	var written uint64
+	commit := func() error {
+		var err error
+		written, err = publish(ctx)
+		return err
+	}
+	if restoring {
+		recoverer, ok := guard.(interface {
+			RecoverPublication(context.Context, contract.RunScope, contract.ReceiptKey, func() error) error
+		})
+		if !ok {
+			return MeshReply{}, contract.ErrAccessDenied
+		}
+		err := recoverer.RecoverPublication(ctx, e.Run, key, commit)
+		return MeshReply{RawOutputBytes: written}, err
+	}
+	err := guard.Publish(ctx, e.Run, key, commit)
 	return MeshReply{RawOutputBytes: written}, err
 }
 
@@ -42,6 +88,17 @@ func (l *Local) withArtifactOutput(ctx context.Context, e EnvironmentRequest, re
 		if l.artifacts == nil || claimed.RunID != req.RunID || claimed.CallID != req.CallID ||
 			claimed.Tool != req.Tool || claimed.Limits != req.Limits || claimed.EnvironmentGrant != req.EnvironmentGrant {
 			return nil, contract.ErrAccessDenied
+		}
+		if _, durable := l.artifacts.(contract.DurableArtifactStore); durable {
+			admission := contract.ArtifactAdmission{Deadline: e.Run.Deadline, Epoch: e.Run.Epoch, Key: key}
+			if e.Run.Epoch != 0 {
+				guard := takeoverGuard(ctx)
+				if guard == nil {
+					return nil, contract.ErrAccessDenied
+				}
+				admission.Seal = func(seal func() error) error { return guard.Publish(ctx, e.Run, key, seal) }
+			}
+			return l.artifacts.OpenWriter(contract.WithArtifactAdmission(ctx, admission), artifactScope(e))
 		}
 		writer, err := l.artifacts.OpenWriter(ctx, artifactScope(e))
 		if err != nil || e.Run.Epoch == 0 {

@@ -44,6 +44,7 @@ type Runner struct {
 	recovery             *contract.RecoveryConfig
 	retainsArtifacts     bool
 	takeoverArtifacts    bool
+	artifactStoreID      string
 	takeoverEnvironments map[contract.EnvironmentRef]contract.TakeoverWorkspace
 	instance             string
 	leaseClock           func() (time.Time, error)

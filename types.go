@@ -94,6 +94,7 @@ const (
 	StopModelInterrupted              = contract.StopModelInterrupted
 	StopReconcileDeadline             = contract.StopReconcileDeadline
 	StopWorkspaceUnavailable          = contract.StopWorkspaceUnavailable
+	StopArtifactUnavailable           = contract.StopArtifactUnavailable
 	ArtifactMaxBlockBytes             = contract.ArtifactMaxBlockBytes
 	StopToolRawOutputLimit            = contract.StopToolRawOutputLimit
 	CapabilityEnforced                = contract.CapabilityEnforced

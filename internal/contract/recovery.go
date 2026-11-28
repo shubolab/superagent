@@ -33,6 +33,7 @@ const (
 	StopModelInterrupted     StopCode = "model_step_interrupted"
 	StopReconcileDeadline    StopCode = "receipt_reconciliation_deadline"
 	StopWorkspaceUnavailable StopCode = "recovery_workspace_unavailable"
+	StopArtifactUnavailable  StopCode = "recovery_artifact_unavailable"
 )
 
 // RecoveryWorkspace returns a stable workspace identity after checking that old writes are fenced.

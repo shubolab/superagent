@@ -56,23 +56,13 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 			return MeshReply{}, err
 		}
 	}
-	if req.Operation == BeginArtifactOutput || req.Operation == SettleArtifactOutput {
-		if req.Operation == SettleArtifactOutput && e.Run.Epoch != 0 {
-			guard := takeoverGuard(ctx)
-			if guard == nil {
-				return MeshReply{}, contract.ErrAccessDenied
-			}
-			var reply MeshReply
-			err := guard.Publish(ctx, e.Run, req.ReceiptKey, func() error {
-				result, err := l.artifactCall(ctx, req.Operation, e)
-				reply = result
-				return err
-			})
-			return reply, err
-		}
-		return l.artifactCall(ctx, req.Operation, e)
+	if req.Operation == BeginArtifactOutput || req.Operation == SettleArtifactOutput || req.Operation == RestoreArtifactOutput {
+		return l.artifactCall(ctx, req)
 	}
 	if req.Operation == VerifyRetainedArtifact {
+		if store, ok := l.artifacts.(contract.DurableArtifactStore); ok {
+			return MeshReply{}, store.CheckArtifact(ctx, artifactScope(e).Owner, req.Artifact.Ref)
+		}
 		return l.readArtifact(ctx, e.Run.Subject, MeshRequest{Runner: e.Run.Runner, RunID: e.Run.RunID, Artifact: req.Artifact})
 	}
 	if req.Operation == VerifyRemoteToolWorkspace {

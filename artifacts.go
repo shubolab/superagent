@@ -16,6 +16,11 @@ func NewLocalArtifactStore(config LocalArtifactConfig) (ArtifactStore, error) {
 	return artifact.NewLocal(config)
 }
 
+// NewLocalRetainedArtifactStore reopens the same private artifact directory across processes.
+func NewLocalRetainedArtifactStore(config LocalArtifactConfig) (ArtifactStore, error) {
+	return artifact.NewRetained(config)
+}
+
 // OpenToolArtifact creates a writer scoped to the active call's artifact budget.
 func OpenToolArtifact(ctx context.Context, req ToolRequest) (ArtifactWriter, error) {
 	return contract.OpenToolArtifact(ctx, req)

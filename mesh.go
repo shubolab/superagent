@@ -68,6 +68,9 @@ func NewMesh(cfg MeshConfig) (*Mesh, error) {
 		if staging, ok := cfg.LocalArtifacts.(contract.TakeoverArtifactStore); ok {
 			runner.SetTakeoverArtifacts(staging.StagesUntilPublication())
 		}
+		if durable, ok := cfg.LocalArtifacts.(contract.DurableArtifactStore); ok {
+			runner.SetArtifactStoreID(durable.ArtifactStoreID())
+		}
 		if err := runner.ConfigureTools(ref, local, config, cfg.LocalTools, cfg.LocalEnvironments, cfg.LocalArtifacts != nil); err != nil {
 			return nil, fmt.Errorf("runner %q: %w", ref, err)
 		}

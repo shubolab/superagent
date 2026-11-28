@@ -48,6 +48,7 @@ const (
 	VerifyRecoveryWorkspace
 	VerifyRetainedArtifact
 	VerifyRemoteToolWorkspace
+	RestoreArtifactOutput
 )
 
 type MeshRequest struct {

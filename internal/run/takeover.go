@@ -111,7 +111,7 @@ func (r *Runner) acquireTakeover(ctx context.Context, path string, identity runI
 		if c.BindingVersion != r.recovery.BindingVersion {
 			return contract.ErrRecoveryBinding
 		}
-		if err := r.validateRemoteBindings(*c); err != nil {
+		if err := r.validateRecoveryBindings(*c); err != nil {
 			return err
 		}
 		if err := r.validateRecovery(identity.Subject, c.Request); err != nil {
@@ -266,6 +266,18 @@ func (l *lease) Publish(ctx context.Context, scope contract.RunScope, key contra
 	return l.owned(ctx, func(c *checkpoint, _ time.Time) error {
 		if !l.Matches(scope) || c.Stop != nil || !time.Now().Before(c.Deadline) ||
 			c.Intent == nil || !c.Intent.Admitted || c.Intent.Key != key || key.AdmissionEpoch != l.owner.Epoch {
+			return contract.ErrAccessDenied
+		}
+		return publish()
+	})
+}
+
+// RecoverPublication is scoped to finalizing existing local output for an admitted call.
+func (l *lease) RecoverPublication(ctx context.Context, scope contract.RunScope, key contract.ReceiptKey, publish func() error) error {
+	return l.owned(ctx, func(c *checkpoint, _ time.Time) error {
+		if !l.Matches(scope) || !scope.Deadline.Equal(c.Deadline) || c.Stop != nil || !time.Now().Before(c.Deadline) ||
+			c.ArtifactStoreID == "" || key.Remote != (contract.RemoteToolIdentity{}) || key.AdmissionEpoch > l.owner.Epoch ||
+			c.Intent == nil || !c.Intent.Admitted || c.Intent.Key != key {
 			return contract.ErrAccessDenied
 		}
 		return publish()

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shubolab/superagent/internal/contract"
 	"github.com/shubolab/superagent/internal/mesh"
 	"github.com/shubolab/superagent/internal/run"
 )
@@ -24,6 +25,7 @@ const recoveryID = "original-run"
 type recoveryFixture struct {
 	root, barrier, version string
 	workspaceWait          time.Duration
+	resultRetention        time.Duration
 	subject                SubjectID
 	prefix                 string
 	modelRequests          uint64
@@ -32,6 +34,8 @@ type recoveryFixture struct {
 	unexecutedReceipt      bool
 	twoTools               bool
 	artifact               bool
+	artifactPage           uint64
+	artifactNow            func() time.Time
 	takeover               *takeoverFixture
 	mu                     sync.Mutex
 }
@@ -210,10 +214,14 @@ func fixtureClient(t *testing.T, fixture *recoveryFixture) (*Client, StartReques
 		defaults.MaxToolRequests = address(uint64(2))
 	}
 	environmentRef := EnvironmentRequirement{Ref: "files", Workspace: "project"}
+	retention := fixture.resultRetention
+	if retention == 0 {
+		retention = time.Minute
+	}
 	cfg := RunnerConfig{
 		AllowedModels: map[SubjectID][]ModelRef{"owner": {"model"}, "other": {"model"}},
 		AllowedTools:  map[SubjectID]map[ToolRef]ToolPermission{"owner": {"write": {Environment: environmentRef, ReadPrefix: fixture.prefix, AllowArtifacts: fixture.artifact}}},
-		DefaultBudget: defaults, BudgetCaps: defaults, ObserveBufferBytes: 4096, ResultRetention: time.Minute,
+		DefaultBudget: defaults, BudgetCaps: defaults, ObserveBufferBytes: 4096, ResultRetention: retention,
 		ContextPolicies: map[ModelRef]ModelContextPolicy{"model": {MaxOutputTokens: 20}},
 		Recovery:        &RecoveryConfig{Directory: filepath.Join(fixture.root, "runs"), BindingVersion: fixture.version, ReconcileTimeout: fixture.workspaceWait},
 	}
@@ -261,7 +269,7 @@ func fixtureClient(t *testing.T, fixture *recoveryFixture) (*Client, StartReques
 		t.Fatal(err)
 	}
 	if fixture.artifact {
-		if err := local.SetArtifactStore(retainedFixtureStore{root: fixture.root}); err != nil {
+		if err := local.SetArtifactStore(retainedFixtureStore{root: fixture.root, pageBytes: fixture.artifactPage, now: fixture.artifactNow}); err != nil {
 			t.Fatal(err)
 		}
 		runner.SetRetainedArtifacts(true)
@@ -409,9 +417,17 @@ type fixtureCheckpoint struct {
 		Epoch, Revision uint64
 		Instance        string
 	}
-	Step    uint32
-	Balance struct{ ModelRequests, ToolRequests, Output, Scan uint64 }
-	Intent  *struct {
+	Step          uint32
+	ModelInFlight bool
+	Pending       *AssistantMessage
+	ToolResults   []ToolResult
+	Messages      []Message
+	WriteEvidence map[CallID]contract.WriteEvidenceRef
+	RemoteCleanup CleanupStatus
+	Result        *Result
+	FinishedAt    time.Time
+	Balance       struct{ ModelRequests, ToolRequests, Output, Scan, Raw uint64 }
+	Intent        *struct {
 		Key    ReceiptKey
 		Limits ToolLimits
 	}
