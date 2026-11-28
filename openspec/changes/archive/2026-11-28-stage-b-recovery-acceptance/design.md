@@ -10,7 +10,7 @@
 | 工具退出后仅凭环境证据恢复 | `TestWriteEvidenceRecoveryAfterRemoteProcessExit`、`TestWriteEvidenceOldGenerationCannotPublishStagedData` | 接管后的成功路径、原窗口耗尽与清理独立回报 |
 | 大产物仅保存引用 | `TestRecoveryRetainsArtifactReferenceAcrossProcesses` 使用测试保留绑定 | 在宿主实际选择的可恢复产物绑定上复验 |
 
-[恢复主规范](../../../specs/run-recovery/spec.md) · [重启与保留测试](../../../../recovery_verification_test.go) · [远程连接夹具](../../../../remote_tool_process_test.go) · [写入证据夹具](../../../../write_evidence_process_test.go)
+[恢复主规范](../../../specs/run-recovery/spec.md) · [重启与保留测试](../../../../sdk/recovery_verification_test.go) · [远程连接夹具](../../../../sdk/remote_tool_process_test.go) · [写入证据夹具](../../../../sdk/write_evidence_process_test.go)
 
 ## Goals / Non-Goals
 

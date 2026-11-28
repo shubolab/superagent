@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/shubolab/superagent/internal/contract"
-	"github.com/shubolab/superagent/internal/run"
+	run "github.com/shubolab/superagent/runner"
 )
 
 // PrepareCommit checks the published receipt or seals the original result. Callers hold the index lock.
@@ -47,7 +47,7 @@ func (s *Store) ReadSealed(idx Index, id contract.RunID) (Turn, error) {
 	if err != nil {
 		return Turn{}, err
 	}
-	turn, err := s.readTurn(id)
+	turn, err := s.readSealedTurn(id)
 	if err != nil {
 		return Turn{}, err
 	}
@@ -73,12 +73,18 @@ func (s *Store) Publish(idx Index, turn Turn) (Receipt, error) {
 	if err := s.Sync(); err != nil {
 		return Receipt{}, err
 	}
+	end, err := s.appendHistory(idx, turn)
+	if err != nil {
+		return Receipt{}, err
+	}
 	idx.Version = turn.Version
 	idx.Receipts = append(idx.Receipts, turn.Receipt)
+	idx.HistoryEnds = append(idx.HistoryEnds, end)
 	idx.Pending = nil
 	if err := s.Save(idx); err != nil {
 		return Receipt{}, err
 	}
+	_ = os.Remove(s.turnPath(turn.RunID))
 	return turn.Receipt, nil
 }
 

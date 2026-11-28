@@ -2,9 +2,8 @@ package superagent
 
 import (
 	"context"
-	"maps"
 
-	"github.com/shubolab/superagent/internal/anthropic"
+	"github.com/shubolab/superagent/model"
 )
 
 // NewAnthropicMessagesAdapter creates a factory adapter for text and client-side tools.
@@ -14,16 +13,16 @@ func NewAnthropicMessagesAdapter(maxOutputTokens uint64) ModelAdapter {
 }
 
 // AnthropicInputProfile supplies the host-validated local meter for one ModelID.
-type AnthropicInputProfile = anthropic.InputProfile
+type AnthropicInputProfile = model.AnthropicInputProfile
 
-type AnthropicAuthentication = anthropic.Authentication
+type AnthropicAuthentication = model.AnthropicAuthentication
 
 const (
-	AnthropicAuthAPIKey = anthropic.AuthAPIKey
-	AnthropicAuthBearer = anthropic.AuthBearer
+	AnthropicAuthAPIKey = model.AnthropicAuthAPIKey
+	AnthropicAuthBearer = model.AnthropicAuthBearer
 )
 
-type AnthropicMessagesOptions = anthropic.Options
+type AnthropicMessagesOptions = model.AnthropicMessagesOptions
 
 // NewMeteredAnthropicMessagesAdapter registers an explicit local meter for each supplied ModelID.
 func NewMeteredAnthropicMessagesAdapter(maxOutputTokens uint64, profiles map[string]AnthropicInputProfile) ModelAdapter {
@@ -33,11 +32,11 @@ func NewMeteredAnthropicMessagesAdapter(maxOutputTokens uint64, profiles map[str
 // NewAnthropicMessagesAdapterWithOptions configures a specific Anthropic-compatible binding.
 // Enable DiscardThinking only on gateways that accept continuation without those blocks.
 func NewAnthropicMessagesAdapterWithOptions(options AnthropicMessagesOptions) ModelAdapter {
-	options.InputProfiles = maps.Clone(options.InputProfiles)
+	adapter := model.NewAnthropicMessagesAdapterWithOptions(options)
 	return ModelAdapter{
-		DefaultEndpoint: anthropic.DefaultEndpoint, RequiresCredential: true,
-		Open: func(_ context.Context, connection ProviderConnection) (ModelAdapterClient, error) {
-			return anthropic.New(connection.Endpoint, connection.Credential, options)
+		DefaultEndpoint: adapter.DefaultEndpoint, RequiresCredential: adapter.RequiresCredential,
+		Open: func(ctx context.Context, connection ProviderConnection) (ModelAdapterClient, error) {
+			return adapter.Open(ctx, model.Connection(connection))
 		},
 	}
 }

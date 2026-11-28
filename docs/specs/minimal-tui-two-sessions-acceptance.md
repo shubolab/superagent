@@ -12,7 +12,7 @@
 | 取消与受理竞争 | 迟到的排队通知无法覆盖取消。授予已成功、启动回执不明两种分支只取消原乙 `RunID`，启动和模型派发各一次。终态先到分支保持原成功结果。SDK 定向验证也确认受理前取消能清除未尝试预约 |
 | 观察与历史收尾 | 注入观察溢出和一次保存失败。观察先保留原预览，随后以可信终态替换。甲保存失败时版本仍为 v0，连按 `Enter` 只重试一次，保存后为 v1。乙切回时可见原流并继续输出 |
 
-[受理通知与切换验收](../../internal/tui/pty_sessions_test.go) · [取消与收尾验收](../../internal/tui/pty_lifecycle_test.go) · [SDK 定向验收](../../session_progress_test.go)
+[受理通知与切换验收](../../internal/tui/pty_sessions_test.go) · [取消与收尾验收](../../internal/tui/pty_lifecycle_test.go) · [SDK 定向验收](../../sdk/session_progress_test.go)
 
 ## 复验
 
@@ -20,7 +20,7 @@
 
 ```sh
 go test -count=1 -run '^TestPTY' ./internal/tui
-go test -count=1 -run '^TestStartProgress' .
+go test -count=1 -run '^TestStartProgress' ./sdk
 go test -count=1 ./...
 GORACE=atexit_sleep_ms=0 go test -race -count=1 ./...
 go vet ./...

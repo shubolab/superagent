@@ -160,6 +160,5 @@ func ToolFingerprint(req contract.ToolRequest, path string) string {
 }
 
 func WriteEvidenceID(key contract.ReceiptKey) string {
-	id, _ := Digest([4]string{string(key.Runner), string(key.Subject), string(key.RunID), string(key.CallID)})
-	return id
+	return contract.WriteEvidenceID(key)
 }

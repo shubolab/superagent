@@ -18,7 +18,7 @@ import (
 type retainedWriter struct {
 	store             *Retained
 	ctx               context.Context
-	admission         contract.ArtifactAdmission
+	admission         contract.ArtifactAccess
 	entry             retainedEntry
 	body, checks, pin *os.File
 	sum, blockSum     hash.Hash
@@ -29,12 +29,12 @@ type retainedWriter struct {
 }
 
 func (s *Retained) OpenWriter(ctx context.Context, call contract.ArtifactCall) (contract.ArtifactWriter, error) {
-	admission, ok := contract.ArtifactAdmissionFrom(ctx)
-	if !ok || (admission.Epoch != 0 && admission.Seal == nil) || !matchesArtifactKey(call, admission.Key, admission.Epoch) {
+	admission, err := contract.VerifyArtifactAccess(ctx, contract.ArtifactOpenWriter, call, contract.ArtifactRef{})
+	if err != nil || !matchesArtifactKey(call, admission.ReceiptKey, admission.Epoch) {
 		return nil, contract.ErrAccessDenied
 	}
 	var w *retainedWriter
-	err := s.withCatalog(ctx, func(c *artifactCatalog) error {
+	err = s.withCatalog(ctx, func(c *artifactCatalog) error {
 		e, ok := c.Entries[artifactCallID(call)]
 		if !ok || e.Call != call || e.Ref.ID != "" || e.Epoch != admission.Epoch || !e.Deadline.Equal(admission.Deadline) ||
 			!time.Now().Before(e.Deadline) {
@@ -159,29 +159,26 @@ func (w *retainedWriter) Complete() (contract.ArtifactRef, error) {
 	s := w.store
 	id := artifactCallID(w.entry.Call)
 	expires := time.Now().UTC().Add(s.cfg.Retention)
-	if w.admission.Key != (contract.ReceiptKey{}) && expires.Before(w.entry.Deadline) {
+	if w.admission.ReceiptKey != (contract.ReceiptKey{}) && expires.Before(w.entry.Deadline) {
 		expires = w.entry.Deadline.UTC()
 	}
 	ref := contract.ArtifactRef{ID: s.id + id, Version: w.entry.Version,
 		SizeBytes: w.used, SHA256: hex.EncodeToString(w.sum.Sum(nil)), ExpiresAt: expires}
-	seal := func() error {
-		return s.withCatalog(w.ctx, func(c *artifactCatalog) error {
+	err := contract.SealArtifact(w.ctx, w.entry.Call, ref, func(ctx context.Context) error {
+		return s.withCatalog(ctx, func(c *artifactCatalog) error {
+			if _, err := contract.VerifyArtifactAccess(ctx, contract.ArtifactSeal, w.entry.Call, ref); err != nil {
+				return err
+			}
 			e := c.Entries[id]
 			if e.Version != w.entry.Version || e.Ref.ID != "" || !time.Now().Before(w.entry.Deadline) {
 				return contract.ErrArtifactUnavailable
 			}
-			e.Ref, e.Key = ref, w.admission.Key
+			e.Ref, e.Key = ref, w.admission.ReceiptKey
 			c.Entries[id] = e
 			_, err := durable.Write(s.catalogPath(), *c)
 			return err
 		})
-	}
-	var err error
-	if w.admission.Seal != nil {
-		err = w.admission.Seal(seal)
-	} else {
-		err = seal()
-	}
+	})
 	if err != nil {
 		return contract.ArtifactRef{}, err
 	}

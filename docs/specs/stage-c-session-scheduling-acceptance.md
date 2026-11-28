@@ -12,14 +12,14 @@
 | 恢复门禁 | 满载时可提交可信终态和已封存增量。活跃 Run 的恢复复用原名额，替换失去推进权的本地运行也沿用原名额。需继续派发的提交补跑排队，释放后仅派发原 `RunID` 一次。直接启动和直接恢复的绕行派发数为 0 |
 | 进程重启 | 在甲持有原检查点、乙纯排队时终止原进程。新装配的等待队列为空。甲按原 `RunID` 从检查点继续，乙仅在显式重送后派发 |
 
-[SDK 调度验收](../../session_scheduling_test.go) · [取消与释放验收](../../session_scheduling_release_test.go) · [恢复与进程验收](../../session_scheduling_recovery_test.go) · [可控时钟](../../internal/schedule/scheduler_test.go) · [运行器故障注入](../../internal/run/scheduling_test.go)
+[SDK 调度验收](../../sdk/session_scheduling_test.go) · [取消与释放验收](../../sdk/session_scheduling_release_test.go) · [恢复与进程验收](../../sdk/session_scheduling_recovery_test.go) · [可控时钟](../../schedule/scheduler_test.go) · [运行器故障注入](../../runner/scheduling_test.go)
 
 ## 复验
 
 7 个用例、全量 Go 普通回归、全量 race、`go vet` 和 OpenSpec 严格校验均通过。Anthropic 实连冒烟和评估开关为 0。
 
 ```sh
-go test -count=1 -run '^(TestSessionScheduling|TestScheduled|TestWaitDeadline|TestUncertainAdmission|TestGrantVersus)' . ./internal/run ./internal/schedule
+go test -count=1 -run '^(TestSessionScheduling|TestScheduled|TestWaitDeadline|TestUncertainAdmission|TestGrantVersus)' ./sdk ./runner ./schedule
 go test -count=1 ./...
 GORACE=atexit_sleep_ms=0 go test -race -count=1 ./...
 go vet ./...

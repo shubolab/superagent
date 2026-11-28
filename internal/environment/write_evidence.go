@@ -89,7 +89,7 @@ func loadWorkspaceIndex(path string) (workspaceIndex, error) {
 	return index, nil
 }
 
-// PublishWorkspace is reserved for the legacy unmanaged append API.
+// PublishWorkspace denies direct appends. Managed writes use CommitWrite.
 func (*EvidenceLocal) PublishWorkspace(context.Context, contract.CallScope, contract.EnvironmentGrantRef, []byte) error {
 	return contract.ErrAccessDenied
 }
@@ -102,7 +102,7 @@ func (l *EvidenceLocal) writeIndex(ctx context.Context, scope contract.CallScope
 		key.Tool != scope.Tool || key.Step == 0 || !contract.ValidContentHash(key.Fingerprint) ||
 		intent.Path != scope.Path || intent.Limits != scope.Limits || !contract.ValidManagedPath(intent.Path) ||
 		!contract.ValidContentHash(intent.AppendHash) || intent.AppendBytes == 0 || intent.AppendBytes > contract.MaxWorkspacePublishBytes || intent.RetainUntil.Before(scope.Run.Deadline) ||
-		!contract.HasWorkspacePublication(ctx, scope, grant) || expired(ctx, scope.Run) {
+		expired(ctx, scope.Run) {
 		return "", "", contract.ErrAccessDenied
 	}
 	_, g := l.findGrant(scope, grant)
@@ -141,6 +141,9 @@ func (l *EvidenceLocal) StageWrite(ctx context.Context, scope contract.CallScope
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var staged contract.StagedWrite
+	if err := contract.VerifyWorkspaceWrite(ctx, scope, grant, intent, nil); err != nil {
+		return staged, err
+	}
 	index, id, err := l.writeIndex(ctx, scope, grant, intent)
 	if err != nil {
 		return staged, err
@@ -190,6 +193,9 @@ func (l *EvidenceLocal) CommitWrite(ctx context.Context, scope contract.CallScop
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var evidence contract.WriteEvidence
+	if err := contract.VerifyWorkspaceWrite(ctx, scope, grant, intent, &staged); err != nil {
+		return evidence, err
+	}
 	index, id, err := l.writeIndex(ctx, scope, grant, intent)
 	if err != nil {
 		return evidence, err
@@ -223,6 +229,9 @@ func (l *EvidenceLocal) CommitWrite(ctx context.Context, scope contract.CallScop
 	if expired(ctx, scope.Run) {
 		return contract.WriteEvidence{}, contract.ErrAccessDenied
 	}
+	if err := contract.VerifyWorkspaceWrite(ctx, scope, grant, intent, &staged); err != nil {
+		return contract.WriteEvidence{}, err
+	}
 	if _, err := durable.Write(index, state); err != nil {
 		return contract.WriteEvidence{}, err
 	}
@@ -232,8 +241,8 @@ func (l *EvidenceLocal) CommitWrite(ctx context.Context, scope contract.CallScop
 func (l *EvidenceLocal) ReadWriteEvidence(ctx context.Context, intent contract.WriteIntent) (contract.WriteEvidence, error) {
 	var zero contract.WriteEvidence
 	key := intent.Key
-	if !contract.HasWriteEvidenceQuery(ctx, intent) {
-		return zero, contract.ErrAccessDenied
+	if err := contract.VerifyWriteEvidenceRead(ctx, intent); err != nil {
+		return zero, err
 	}
 	if !l.now().Before(intent.RetainUntil) {
 		return zero, contract.ErrWriteEvidenceUnavailable
@@ -266,7 +275,7 @@ func (l *EvidenceLocal) ReadWriteEvidence(ctx context.Context, intent contract.W
 	if !matchesAppend(contents, evidence.BaseVersion, intent) {
 		return zero, contract.ErrWriteEvidenceUnavailable
 	}
-	if err := ctx.Err(); err != nil {
+	if err := contract.VerifyWriteEvidenceRead(ctx, intent); err != nil {
 		return zero, err
 	}
 	return evidence, nil

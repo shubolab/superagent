@@ -19,8 +19,8 @@
 | --- | --- |
 | 根包 `superagent` | 宿主装配、公开 `Client` 和 `Run`，暴露公共 DTO 的类型别名 |
 | `internal/contract` | 共享的 ID、消息、模型流、事件和结果类型 |
-| `internal/mesh` | 本地登记、绑定选择、可信调用者上下文、普通请求和流转发 |
-| `internal/run` | 受理、去重、输入快照、预算、事件缓冲、取消和终态 |
+| `mesh` | 本地登记、绑定选择、可信调用者上下文、普通请求和流转发 |
+| `runner` | 受理、去重、输入快照、预算、事件缓冲、取消和终态 |
 
 ```mermaid
 flowchart TB

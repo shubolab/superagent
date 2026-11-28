@@ -52,33 +52,43 @@ func TestManagedWriteEvidenceRetentionAndConflicts(t *testing.T) {
 		return cs, grant, intent
 	}
 
+	stage := func(scope contract.CallScope, grant contract.EnvironmentGrantRef, intent contract.WriteIntent, data string) (contract.StagedWrite, error) {
+		writeCtx, end := contract.WithWorkspaceWriteAccess(ctx, scope, grant, intent, nil)
+		defer end()
+		return workspace.StageWrite(writeCtx, scope, grant, intent, []byte(data))
+	}
+	commit := func(scope contract.CallScope, grant contract.EnvironmentGrantRef, intent contract.WriteIntent, staged contract.StagedWrite) (contract.WriteEvidence, error) {
+		commitCtx, end := contract.WithWorkspaceWriteAccess(ctx, scope, grant, intent, &staged)
+		defer end()
+		return workspace.CommitWrite(commitCtx, scope, grant, intent, staged)
+	}
 	cs, grant, first := prepare("c1", "first\n")
-	writeCtx := contract.WithWorkspacePublication(ctx, cs, grant)
-	staged, err := workspace.StageWrite(writeCtx, cs, grant, first, []byte("first\n"))
+	staged, err := stage(cs, grant, first, "first\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := workspace.OpenRead(ctx, cs, grant, cs.Path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("staged data is visible: %v", err)
 	}
-	query := contract.WithWriteEvidenceQuery(ctx, first)
+	query, endQuery := contract.WithWriteEvidenceQuery(ctx, first)
+	defer endQuery()
 	if _, err := workspace.ReadWriteEvidence(query, first); !errors.Is(err, contract.ErrWriteEvidenceUnavailable) {
 		t.Fatalf("staged operation has proof: %v", err)
 	}
-	proof, err := workspace.CommitWrite(writeCtx, cs, grant, first, staged)
+	proof, err := commit(cs, grant, first, staged)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repeated, err := workspace.StageWrite(writeCtx, cs, grant, first, []byte("first\n"))
+	repeated, err := stage(cs, grant, first, "first\n")
 	if err != nil || repeated != staged {
 		t.Fatalf("repeat staged a different version: %+v (%v)", repeated, err)
 	}
-	if duplicate, err := workspace.CommitWrite(writeCtx, cs, grant, first, repeated); err != nil || duplicate.Ref != proof.Ref {
+	if duplicate, err := commit(cs, grant, first, repeated); err != nil || duplicate.Ref != proof.Ref {
 		t.Fatalf("repeat committed a different proof: %+v (%v)", duplicate, err)
 	}
 	conflict := first
 	conflict.AppendHash, conflict.AppendBytes = contract.HashBytes([]byte("changed")), 7
-	if _, err := workspace.StageWrite(writeCtx, cs, grant, conflict, []byte("changed")); !errors.Is(err, contract.ErrStartConflict) {
+	if _, err := stage(cs, grant, conflict, "changed"); !errors.Is(err, contract.ErrStartConflict) {
 		t.Fatalf("conflicting duplicate: %v", err)
 	}
 	if err := workspace.Release(ctx, run, cs.Handle); err != nil {
@@ -90,12 +100,11 @@ func TestManagedWriteEvidenceRetentionAndConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondScope, secondGrant, second := prepare("c2", "second\n")
-	secondCtx := contract.WithWorkspacePublication(ctx, secondScope, secondGrant)
-	next, err := workspace.StageWrite(secondCtx, secondScope, secondGrant, second, []byte("second\n"))
+	next, err := stage(secondScope, secondGrant, second, "second\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.CommitWrite(secondCtx, secondScope, secondGrant, second, next); err != nil {
+	if _, err := commit(secondScope, secondGrant, second, next); err != nil {
 		t.Fatal(err)
 	}
 	f, err := workspace.OpenRead(ctx, secondScope, secondGrant, secondScope.Path)

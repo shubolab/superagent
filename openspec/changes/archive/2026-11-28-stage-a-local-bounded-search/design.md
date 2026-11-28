@@ -2,7 +2,7 @@
 
 ## Context
 
-当前 `internal/run/model.go` 一次只推进一轮纯文本，完整回复直接提交终态。Mesh 已有普通请求和流入口。本切片复用这些入口，加上串行工具批次、文件读取授权及逐步预算。 [提案](proposal.md)
+当前 `runner/model.go` 一次只推进一轮纯文本，完整回复直接提交终态。Mesh 已有普通请求和流入口。本切片复用这些入口，加上串行工具批次、文件读取授权及逐步预算。 [提案](proposal.md)
 
 ## Goals / Non-Goals
 
@@ -16,8 +16,8 @@
 | 位置 | 增量 |
 | --- | --- |
 | 根包与 `internal/contract` | 扩展 `MeshConfig` 的工具和环境登记，以及 `StartRequest` 的 `Tools`、`Environment`。加入 `ToolSpec`、`Tool.Invoke`、`ToolResult`、模型工具声明和 SDK 工具事件 |
-| `internal/mesh` | 沿用 `OpenStream` 调模型。用类型化 `Call` 承载工具调用和环境的分配、授权、打开、撤销与释放 |
-| `internal/run` | 将模型推进改为逐轮，唯一持有 Run 预算、顺序、停止裁决及消息提交 |
+| `mesh` | 沿用 `OpenStream` 调模型。用类型化 `Call` 承载工具调用和环境的分配、授权、打开、撤销与释放 |
+| `runner` | 将模型推进改为逐轮，唯一持有 Run 预算、顺序、停止裁决及消息提交 |
 | `internal/environment`、`internal/search` | 环境持有目录能力与授权，搜索只消费受限读取流并产生有界回执。根包按现有依赖方向接入 |
 
 入口和回执使用现有 [Tool.Invoke 契约](../../../docs/specs/tool-invoke.md)。读取接口提供可取消、可关闭的受限流。工具拿到的工作区访问入口只识别它的按次授权，环境对每次打开复核并限制后续读取。

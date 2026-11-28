@@ -50,7 +50,12 @@ type ArtifactStore interface {
 	Close() error
 }
 
-// DurableArtifactStore validates immutable bytes before entering a short publication fence.
+// DurableArtifactStore seals immutable bytes and publishes an authorized reference.
+// A recoverable Run that produces artifacts requires this interface.
+// The store ID must survive a restart of the same binding. PrepareArtifactPublication
+// validates the original sealed bytes. Its returned function verifies the publish
+// authorization, atomically marks the same reference visible and returns its byte
+// count. A repeated confirmation returns the same count without publishing again.
 type DurableArtifactStore interface {
 	TakeoverArtifactStore
 	ArtifactStoreID() string
@@ -60,10 +65,35 @@ type DurableArtifactStore interface {
 
 // ArtifactAdmission is supplied by the trusted Mesh, outside the public tool request.
 type ArtifactAdmission struct {
-	Deadline time.Time
-	Epoch    uint64
-	Key      ReceiptKey
-	Seal     func(func() error) error
+	Operation ArtifactOperation
+	Call      ArtifactCall
+	Ref       ArtifactRef
+	Deadline  time.Time
+	Epoch     uint64
+	Key       ReceiptKey
+	Seal      func(context.Context, func() error) error
+	Active    func() bool
+	permit    *storagePermit
+	sealUsed  *storagePermit
+}
+
+type ArtifactOperation uint8
+
+const (
+	ArtifactReserve ArtifactOperation = iota + 1
+	ArtifactOpenWriter
+	ArtifactSeal
+	ArtifactPreparePublication
+	ArtifactPublish
+	ArtifactDiscard
+	ArtifactCheck
+	ArtifactRead
+)
+
+type ArtifactAccess struct {
+	Deadline   time.Time
+	Epoch      uint64
+	ReceiptKey ReceiptKey
 }
 
 type artifactAdmissionKey struct{}
@@ -75,6 +105,64 @@ func WithArtifactAdmission(ctx context.Context, admission ArtifactAdmission) con
 func ArtifactAdmissionFrom(ctx context.Context) (ArtifactAdmission, bool) {
 	value, ok := ctx.Value(artifactAdmissionKey{}).(ArtifactAdmission)
 	return value, ok
+}
+
+func WithScopedArtifactAdmission(ctx context.Context, admission ArtifactAdmission) (context.Context, func()) {
+	admission.permit = &storagePermit{ctx: ctx}
+	return WithArtifactAdmission(WithoutStorageRun(ctx), admission), admission.permit.revoke
+}
+
+func WithArtifactWriterAdmission(ctx context.Context, admission ArtifactAdmission) context.Context {
+	admission.sealUsed = &storagePermit{ctx: ctx}
+	return WithArtifactAdmission(WithoutStorageRun(ctx), admission)
+}
+
+func VerifyArtifactAccess(ctx context.Context, op ArtifactOperation, call ArtifactCall, ref ArtifactRef) (ArtifactAccess, error) {
+	admission, ok := ArtifactAdmissionFrom(ctx)
+	if !ok || op == 0 || admission.Operation != op || admission.Call != call || !sameArtifactAccessRef(admission.Ref, ref) ||
+		(admission.permit != nil && !admission.permit.active()) || (admission.Active != nil && !admission.Active()) ||
+		(op != ArtifactDiscard && !admission.Deadline.IsZero() && !time.Now().Before(admission.Deadline)) {
+		return ArtifactAccess{}, ErrAccessDenied
+	}
+	if err := ctx.Err(); err != nil {
+		return ArtifactAccess{}, err
+	}
+	return ArtifactAccess{Deadline: admission.Deadline, Epoch: admission.Epoch, ReceiptKey: admission.Key}, nil
+}
+
+func sameArtifactAccessRef(a, b ArtifactRef) bool {
+	return a.ID == b.ID && a.Version == b.Version && a.SizeBytes == b.SizeBytes && a.SHA256 == b.SHA256 && a.ExpiresAt.Equal(b.ExpiresAt)
+}
+
+func SealArtifact(ctx context.Context, call ArtifactCall, ref ArtifactRef, commit func(context.Context) error) error {
+	if _, err := VerifyArtifactAccess(ctx, ArtifactOpenWriter, call, ArtifactRef{}); err != nil {
+		return err
+	}
+	admission, _ := ArtifactAdmissionFrom(ctx)
+	if commit == nil || ref.ID == "" || ref.Version == "" || !ValidContentHash(ref.SHA256) || ref.SizeBytes > call.MaxBytes ||
+		!time.Now().Before(ref.ExpiresAt) || (admission.Key != (ReceiptKey{}) && ref.ExpiresAt.Before(admission.Deadline)) {
+		return ErrArtifactReceipt
+	}
+	if admission.sealUsed == nil || !admission.sealUsed.revoked.CompareAndSwap(false, true) {
+		return ErrAccessDenied
+	}
+	fence := admission.Seal
+	admission.Operation, admission.Ref, admission.Seal = ArtifactSeal, ref, nil
+	seal := func() error {
+		commitCtx, end := WithScopedArtifactAdmission(ctx, admission)
+		defer end()
+		if _, err := VerifyArtifactAccess(commitCtx, ArtifactSeal, call, ref); err != nil {
+			return err
+		}
+		return commit(commitCtx)
+	}
+	if fence != nil {
+		return fence(ctx, seal)
+	}
+	if admission.Epoch != 0 {
+		return ErrAccessDenied
+	}
+	return seal()
 }
 
 var (

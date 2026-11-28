@@ -19,7 +19,9 @@ func (s *server) queryReceipt(ctx context.Context, msg request) (*contract.ToolR
 		return nil, contract.ErrWriteEvidenceUnavailable
 	}
 	env := s.cfg.Environment.(contract.EvidenceWorkspace)
-	evidence, err := env.ReadWriteEvidence(contract.WithWriteEvidenceQuery(ctx, *intent), *intent)
+	queryCtx, end := contract.WithWriteEvidenceQuery(ctx, *intent)
+	defer end()
+	evidence, err := env.ReadWriteEvidence(queryCtx, *intent)
 	if err != nil {
 		return nil, err
 	}
@@ -62,8 +64,9 @@ func (s *server) executeWrite(ctx context.Context, call execution, req contract.
 	}
 	workspace := env.(contract.EvidenceWorkspace)
 	intent := *call.write
-	writeCtx := contract.WithWorkspacePublication(ctx, cs, grant)
+	writeCtx, endStage := contract.WithWorkspaceWriteAccess(ctx, cs, grant, intent, nil)
 	staged, err := workspace.StageWrite(writeCtx, cs, grant, intent, call.data)
+	endStage()
 	if err != nil {
 		return result, cleanup, err
 	}
@@ -75,7 +78,9 @@ func (s *server) executeWrite(ctx context.Context, call execution, req contract.
 		return result, cleanup, err
 	}
 	publish := func() error {
-		evidence, err := workspace.CommitWrite(writeCtx, cs, grant, intent, staged)
+		commitCtx, endCommit := contract.WithWorkspaceWriteAccess(ctx, cs, grant, intent, &staged)
+		defer endCommit()
+		evidence, err := workspace.CommitWrite(commitCtx, cs, grant, intent, staged)
 		if err != nil {
 			return err
 		}

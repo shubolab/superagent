@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"sync/atomic"
 	"time"
 
 	"github.com/shubolab/superagent/internal/contract"
@@ -45,6 +44,7 @@ func NewHandler(cfg ServerConfig) (http.Handler, error) {
 	spec := cfg.Binding.Spec
 	usesEvidence := cfg.Identity.EvidenceRule != ""
 	if !validIdentity(cfg.Identity) || cfg.ToolRef == "" || (cfg.Binding.Tool == nil && !usesEvidence) || cfg.Authorize == nil ||
+		spec.NeedsWorkspaceWrite != usesEvidence ||
 		spec.NeedsArtifactOutput || spec.NeedsContextSource || spec.Limits.MaxResultBytes == 0 || spec.Limits.MaxResultBytes > maxReceiptBytes {
 		return nil, contract.ErrInvalidConfiguration
 	}
@@ -54,20 +54,14 @@ func NewHandler(cfg ServerConfig) (http.Handler, error) {
 		}
 	}
 	if usesEvidence {
-		if _, ok := cfg.Environment.(contract.EvidenceWorkspace); !ok || !spec.NeedsWorkspaceWrite ||
+		if _, ok := cfg.Environment.(contract.EvidenceWorkspace); !ok ||
 			spec.NeedsReadAccess || cfg.Binding.Tool != nil || cfg.EvidenceRetention <= 0 || cfg.Binding.Prepare != nil {
 			return nil, contract.ErrInvalidConfiguration
 		}
 	}
-	if spec.NeedsReadAccess || spec.NeedsWorkspaceWrite {
-		if cfg.Identity.Workspace == "" || (cfg.Binding.Prepare == nil && !usesEvidence) || spec.Limits.MaxScanBytes == 0 {
-			return nil, contract.ErrInvalidConfiguration
-		}
-		if spec.NeedsWorkspaceWrite {
-			if _, ok := cfg.Environment.(contract.TakeoverWorkspace); !ok {
-				return nil, contract.ErrInvalidConfiguration
-			}
-		}
+	if (spec.NeedsReadAccess || usesEvidence) &&
+		(cfg.Identity.Workspace == "" || (spec.NeedsReadAccess && cfg.Binding.Prepare == nil) || spec.Limits.MaxScanBytes == 0) {
+		return nil, contract.ErrInvalidConfiguration
 	}
 	if !durable.Supported {
 		return nil, contract.ErrInvalidConfiguration
@@ -222,7 +216,7 @@ func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result 
 	if err := s.verifyWorkspace(ctx, call.Scope); err != nil {
 		return result, cleanup, err
 	}
-	if !spec.NeedsReadAccess && !spec.NeedsWorkspaceWrite {
+	if !spec.NeedsReadAccess {
 		result, err = s.cfg.Binding.Tool.Invoke(ctx, req)
 		return result, contract.CleanupReleased, err
 	}
@@ -236,7 +230,6 @@ func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result 
 	}
 	callScope := contract.CallScope{Run: scope, CallID: req.CallID, Tool: req.Tool, Handle: handle, Path: call.path, Limits: req.Limits}
 	var grant contract.EnvironmentGrantRef
-	var published atomic.Bool
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
@@ -245,7 +238,7 @@ func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result 
 		if grant != "" {
 			scanned, revokeErr = env.Revoke(cleanupCtx, callScope, grant)
 		}
-		if result.State == contract.ToolExecutionNotExecuted && (published.Load() || scanned > 0 || revokeErr != nil) {
+		if result.State == contract.ToolExecutionNotExecuted && (scanned > 0 || revokeErr != nil) {
 			err = contract.ErrRecoveryUnavailable
 		}
 		if err == nil && revokeErr == nil && scanned <= req.Limits.MaxScanBytes {
@@ -265,34 +258,12 @@ func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result 
 		return claimed.RunID == req.RunID && claimed.CallID == req.CallID && claimed.Tool == req.Tool &&
 			claimed.EnvironmentGrant == grant && claimed.Limits == req.Limits && path == call.path
 	}
-	toolCtx := ctx
-	if spec.NeedsReadAccess {
-		toolCtx = contract.WithFileOpener(toolCtx, func(openCtx context.Context, claimed contract.ToolRequest, path string) (io.ReadCloser, error) {
-			if !authorized(claimed, path) || openCtx.Err() != nil {
-				return nil, contract.ErrAccessDenied
-			}
-			return env.OpenRead(ctx, callScope, grant, path)
-		})
-	}
-	if spec.NeedsWorkspaceWrite {
-		workspace := env.(contract.TakeoverWorkspace)
-		toolCtx = contract.WithWorkspacePublisher(toolCtx, func(writeCtx context.Context, claimed contract.ToolRequest, path string, data []byte) error {
-			if !authorized(claimed, path) || writeCtx.Err() != nil || len(data) > contract.MaxWorkspacePublishBytes {
-				return contract.ErrAccessDenied
-			}
-			publish := func() error {
-				if err := s.verifyWorkspace(ctx, call.Scope); err != nil {
-					return err
-				}
-				published.Store(true)
-				return workspace.PublishWorkspace(contract.WithWorkspacePublication(ctx, callScope, grant), callScope, grant, data)
-			}
-			if call.Owner.Epoch != 0 {
-				return s.cfg.Authority.PublishRemote(ctx, call.Key, call.Scope, call.Owner, publish)
-			}
-			return publish()
-		})
-	}
+	toolCtx := contract.WithFileOpener(ctx, func(openCtx context.Context, claimed contract.ToolRequest, path string) (io.ReadCloser, error) {
+		if !authorized(claimed, path) || openCtx.Err() != nil {
+			return nil, contract.ErrAccessDenied
+		}
+		return env.OpenRead(ctx, callScope, grant, path)
+	})
 	result, err = s.cfg.Binding.Tool.Invoke(toolCtx, req)
 	return result, cleanup, err
 }

@@ -27,8 +27,12 @@ func quotaCall(id contract.RunID) contract.ArtifactCall {
 		CallID: "call", Tool: "write", MaxBytes: 2048}
 }
 
-func quotaContext(ctx context.Context, deadline time.Time) context.Context {
-	return contract.WithArtifactAdmission(ctx, contract.ArtifactAdmission{Deadline: deadline})
+func quotaContext(ctx context.Context, deadline time.Time, op contract.ArtifactOperation, call contract.ArtifactCall, ref contract.ArtifactRef) context.Context {
+	admission := contract.ArtifactAdmission{Operation: op, Call: call, Ref: ref, Deadline: deadline}
+	if op == contract.ArtifactOpenWriter {
+		return contract.WithArtifactWriterAdmission(ctx, admission)
+	}
+	return contract.WithArtifactAdmission(ctx, admission)
 }
 
 func TestRetainedQuotaWriterProcess(t *testing.T) {
@@ -41,14 +45,14 @@ func TestRetainedQuotaWriterProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(1800 * time.Millisecond)
-	ctx := quotaContext(t.Context(), deadline)
 	call := quotaCall("writer")
-	limit, err := store.Begin(ctx, call)
+	ctx := t.Context()
+	limit, err := store.Begin(quotaContext(ctx, deadline, contract.ArtifactReserve, call, contract.ArtifactRef{}), call)
 	if err != nil || limit != 1024 {
 		t.Fatalf("writer reservation: %d (%v)", limit, err)
 	}
 	call.MaxBytes = limit
-	writer, err := store.OpenWriter(ctx, call)
+	writer, err := store.OpenWriter(quotaContext(ctx, deadline, contract.ArtifactOpenWriter, call, contract.ArtifactRef{}), call)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,13 +109,16 @@ func TestRetainedQuotaAcrossProcesses(t *testing.T) {
 	}
 	defer store.Close()
 	kept := quotaCall("kept")
-	keptCtx := quotaContext(ctx, time.Now().Add(time.Minute))
-	limit, err := store.Begin(keptCtx, kept)
+	keptDeadline := time.Now().Add(time.Minute)
+	access := func(op contract.ArtifactOperation, call contract.ArtifactCall, ref contract.ArtifactRef) context.Context {
+		return quotaContext(ctx, keptDeadline, op, call, ref)
+	}
+	limit, err := store.Begin(access(contract.ArtifactReserve, kept, contract.ArtifactRef{}), kept)
 	if err != nil || limit != 512 {
 		t.Fatalf("second process did not respect shared byte allowance: %d (%v)", limit, err)
 	}
 	kept.MaxBytes = limit
-	w, err := store.OpenWriter(keptCtx, kept)
+	w, err := store.OpenWriter(access(contract.ArtifactOpenWriter, kept, contract.ArtifactRef{}), kept)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,14 +132,14 @@ func TestRetainedQuotaAcrossProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if size, err := store.Settle(keptCtx, kept, []contract.ArtifactRef{ref}); err != nil || size != uint64(len(payload)) {
+		if size, err := store.Settle(access(contract.ArtifactPublish, kept, ref), kept, []contract.ArtifactRef{ref}); err != nil || size != uint64(len(payload)) {
 			t.Fatalf("publish or re-confirm: %d (%v)", size, err)
 		}
 	}
 	third := quotaCall("third")
 	checkCount := func() {
 		t.Helper()
-		if limit, err := store.Begin(keptCtx, third); !errors.Is(err, contract.ErrArtifactCapacity) || limit != 0 {
+		if limit, err := store.Begin(access(contract.ArtifactReserve, third, contract.ArtifactRef{}), third); !errors.Is(err, contract.ErrArtifactCapacity) || limit != 0 {
 			t.Fatalf("count quota or active writer protection failed: %d (%v)", limit, err)
 		}
 	}
@@ -162,19 +169,19 @@ func TestRetainedQuotaAcrossProcesses(t *testing.T) {
 	if _, err := os.Stat(staging); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("atomic-write staging was not reclaimed: %v", err)
 	}
-	if limit, err := reopened.Begin(keptCtx, third); err != nil || limit != 1024 {
+	if limit, err := reopened.Begin(access(contract.ArtifactReserve, third, contract.ArtifactRef{}), third); err != nil || limit != 1024 {
 		t.Fatalf("abandoned slot was not reclaimed or per-artifact cap failed: %d (%v)", limit, err)
 	}
 	pieces, err := filepath.Glob(filepath.Join(root, "*.body"))
 	if err != nil || len(pieces) != 1 {
 		t.Fatalf("abandoned staged body survived reaping: %v (%v)", pieces, err)
 	}
-	page, err := reopened.ReadArtifact(ctx, kept.Owner, ref, 0, 125)
+	page, err := reopened.ReadArtifact(access(contract.ArtifactRead, contract.ArtifactCall{Owner: kept.Owner}, ref), kept.Owner, ref, 0, 125)
 	if err != nil || !bytes.Equal(page.Content, payload[:125]) {
 		t.Fatalf("valid published artifact was removed by reaping: %+v (%v)", page, err)
 	}
 	third.MaxBytes = 1024
-	limited, err := reopened.OpenWriter(keptCtx, third)
+	limited, err := reopened.OpenWriter(access(contract.ArtifactOpenWriter, third, contract.ArtifactRef{}), third)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -59,11 +59,45 @@ type StagedWrite struct {
 	Version     FileVersion
 }
 
+// EvidenceWorkspace stages a private immutable version, then commits the visible
+// path and its original-call proof together. A retry of a committed intent returns
+// the existing proof. ReadWriteEvidence verifies the immutable original version.
 type EvidenceWorkspace interface {
 	TakeoverWorkspace
 	StageWrite(context.Context, CallScope, EnvironmentGrantRef, WriteIntent, []byte) (StagedWrite, error)
 	CommitWrite(context.Context, CallScope, EnvironmentGrantRef, WriteIntent, StagedWrite) (WriteEvidence, error)
 	ReadWriteEvidence(context.Context, WriteIntent) (WriteEvidence, error)
+}
+
+func WriteEvidenceID(key ReceiptKey) string {
+	data, _ := json.Marshal([4]string{string(key.Runner), string(key.Subject), string(key.RunID), string(key.CallID)})
+	return HashBytes(data)
+}
+
+type workspaceWriteAccess struct {
+	scope  CallScope
+	grant  EnvironmentGrantRef
+	intent WriteIntent
+	staged *StagedWrite
+	permit *storagePermit
+}
+
+type workspaceWriteKey struct{}
+
+func WithWorkspaceWriteAccess(ctx context.Context, scope CallScope, grant EnvironmentGrantRef, intent WriteIntent, staged *StagedWrite) (context.Context, func()) {
+	permit := &storagePermit{ctx: ctx}
+	access := workspaceWriteAccess{scope: scope, grant: grant, intent: intent, staged: staged, permit: permit}
+	return context.WithValue(ctx, workspaceWriteKey{}, access), permit.revoke
+}
+
+func VerifyWorkspaceWrite(ctx context.Context, scope CallScope, grant EnvironmentGrantRef, intent WriteIntent, staged *StagedWrite) error {
+	access, ok := ctx.Value(workspaceWriteKey{}).(workspaceWriteAccess)
+	if !ok || !access.permit.active() || access.scope != scope || grant == "" || access.grant != grant ||
+		!access.intent.Matches(intent) || (access.staged == nil) != (staged == nil) ||
+		(staged != nil && *access.staged != *staged) || !time.Now().Before(scope.Run.Deadline) {
+		return ErrAccessDenied
+	}
+	return ctx.Err()
 }
 
 func ValidManagedPath(path string) bool {
@@ -102,11 +136,23 @@ func ParseEvidenceAppend(raw json.RawMessage) (path string, data []byte, err err
 
 type writeEvidenceQueryKey struct{}
 
-func WithWriteEvidenceQuery(ctx context.Context, intent WriteIntent) context.Context {
-	return context.WithValue(ctx, writeEvidenceQueryKey{}, intent)
+type writeEvidenceQuery struct {
+	intent WriteIntent
+	permit *storagePermit
 }
 
-func HasWriteEvidenceQuery(ctx context.Context, intent WriteIntent) bool {
-	authorized, ok := ctx.Value(writeEvidenceQueryKey{}).(WriteIntent)
-	return ok && authorized.Matches(intent)
+func WithWriteEvidenceQuery(ctx context.Context, intent WriteIntent) (context.Context, func()) {
+	permit := &storagePermit{ctx: ctx}
+	return context.WithValue(ctx, writeEvidenceQueryKey{}, writeEvidenceQuery{intent, permit}), permit.revoke
+}
+
+func VerifyWriteEvidenceRead(ctx context.Context, intent WriteIntent) error {
+	query, ok := ctx.Value(writeEvidenceQueryKey{}).(writeEvidenceQuery)
+	if !ok || !query.permit.active() || !query.intent.Matches(intent) {
+		return ErrAccessDenied
+	}
+	if !time.Now().Before(intent.RetainUntil) {
+		return ErrWriteEvidenceUnavailable
+	}
+	return ctx.Err()
 }

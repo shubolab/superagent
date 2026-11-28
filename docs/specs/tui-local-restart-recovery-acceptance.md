@@ -24,7 +24,7 @@
 | 旧进程占用、原截止、已停止 | 甲 | `09045c8d310d725c58c9464dc06f13d1`、`0dfa54972eafea3a77eba1da3a0c0b78`、`0a68e984cb61a79a1562b4525b221c7f` |
 | 恢复排队再退出 | 乙 | `b89d06278f6de697ae954d0356dfbe9d` |
 
-[独立进程验收](../../internal/tui/restart_cases_test.go) · [进程装配与故障注入](../../internal/tui/restart_pty_test.go) · [SDK 只读与授予复核](../../session_reopen_test.go)
+[独立进程验收](../../internal/tui/restart_cases_test.go) · [进程装配与故障注入](../../internal/tui/restart_pty_test.go) · [SDK 只读与授予复核](../../sdk/session_reopen_test.go)
 
 ## 复验
 
@@ -32,7 +32,7 @@
 
 ```sh
 go test -count=1 -v -run '^TestTUIRestart' ./internal/tui
-go test -count=1 -run '^(TestInspectPendingReadOnly|TestCommitPendingResultIdempotent|TestResumeAdmittedRechecksAfterGrant)$' .
+go test -count=1 -run '^(TestInspectPendingReadOnly|TestCommitPendingResultIdempotent|TestResumeAdmittedRechecksAfterGrant)$' ./sdk
 SUPERAGENT_ANTHROPIC_LIVE=0 SUPERAGENT_ANTHROPIC_EVAL=0 go test -count=1 ./...
 GORACE=atexit_sleep_ms=0 SUPERAGENT_ANTHROPIC_LIVE=0 SUPERAGENT_ANTHROPIC_EVAL=0 go test -race -count=1 ./...
 go vet ./...

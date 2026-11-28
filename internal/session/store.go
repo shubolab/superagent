@@ -15,17 +15,18 @@ import (
 
 	"github.com/shubolab/superagent/internal/contract"
 	"github.com/shubolab/superagent/internal/durable"
+	api "github.com/shubolab/superagent/session"
 )
 
 var (
-	ErrBusy              = contract.ErrSessionBusy
-	ErrCapacity          = errors.New("session capacity reached")
-	ErrHistoryLimit      = errors.New("latest turn exceeds the session history window")
-	ErrOwnership         = errors.New("run or session ownership mismatch")
-	ErrVersion           = errors.New("session version conflict")
-	ErrContent           = errors.New("session run content conflict")
-	ErrStorage           = errors.New("session storage unavailable")
-	ErrResultUnavailable = errors.New("session run result unavailable")
+	ErrBusy              = api.ErrBusy
+	ErrCapacity          = api.ErrCapacity
+	ErrHistoryLimit      = api.ErrHistoryLimit
+	ErrOwnership         = api.ErrOwnership
+	ErrVersion           = api.ErrVersion
+	ErrContent           = api.ErrContent
+	ErrStorage           = api.ErrStorage
+	ErrResultUnavailable = api.ErrResultUnavailable
 )
 
 type Config struct {
@@ -34,11 +35,7 @@ type Config struct {
 	MaxHistoryBytes uint64
 }
 
-type Scope struct {
-	Subject contract.SubjectID
-	Session string
-	Runner  contract.RunnerRef
-}
+type Scope = api.Scope
 
 type Receipt struct {
 	RunID   contract.RunID
@@ -46,21 +43,17 @@ type Receipt struct {
 	Digest  string
 }
 
-type Pending struct {
-	Version       uint64
-	FirstVersion  uint64
-	Binding       string
-	RequestDigest string
-	Request       contract.StartRequest
-	Attempted     bool
-}
+type Pending = api.Reservation
+
+const indexFormat = 2
 
 type Index struct {
-	Format   int
-	Scope    Scope
-	Version  uint64
-	Pending  *Pending
-	Receipts []Receipt
+	Format      int
+	Scope       Scope
+	Version     uint64
+	Pending     *Pending
+	Receipts    []Receipt
+	HistoryEnds []int64 `json:",omitempty"`
 }
 
 type Turn struct {
@@ -78,13 +71,17 @@ type Store struct {
 	namespace string
 }
 
+func ValidScope(scope Scope, limits api.Limits) bool {
+	return limits.MaxTurns > 0 &&
+		limits.MaxHistoryBytes >= 2 && limits.MaxHistoryBytes <= durable.MaxRecordBytes &&
+		scope.Subject != "" && scope.Session != "" && scope.Runner != "" &&
+		utf8.ValidString(string(scope.Subject)) && utf8.ValidString(scope.Session) && utf8.ValidString(string(scope.Runner))
+}
+
 func Open(ctx context.Context, cfg Config, scope Scope) (*Store, error) {
-	// Reserve ample room per receipt in the fixed-size index.
-	if !durable.Supported || cfg.MaxTurns == 0 || cfg.MaxTurns > durable.MaxRecordBytes/256 ||
-		cfg.MaxHistoryBytes < 2 || cfg.MaxHistoryBytes > durable.MaxRecordBytes ||
-		scope.Subject == "" || scope.Session == "" || scope.Runner == "" ||
-		!utf8.ValidString(string(scope.Subject)) || !utf8.ValidString(scope.Session) || !utf8.ValidString(string(scope.Runner)) ||
-		!filepath.IsAbs(cfg.Directory) {
+	// Reserve ample room per receipt in the fixed-size file index.
+	if !durable.Supported || cfg.MaxTurns > durable.MaxRecordBytes/256 ||
+		!ValidScope(scope, api.Limits{MaxTurns: cfg.MaxTurns, MaxHistoryBytes: cfg.MaxHistoryBytes}) || !filepath.IsAbs(cfg.Directory) {
 		return nil, contract.ErrInvalidConfiguration
 	}
 	if err := durable.Directory(cfg.Directory); err != nil {
@@ -94,38 +91,51 @@ func Open(ctx context.Context, cfg Config, scope Scope) (*Store, error) {
 	if err != nil {
 		return nil, storageError(err)
 	}
-	namespace, err := durable.Digest(scope)
-	if err != nil {
-		return nil, storageError(err)
-	}
-	s := &Store{cfg: cfg, scope: scope, indexPath: filepath.Join(cfg.Directory, key+".session"), namespace: namespace}
+	s := &Store{cfg: cfg, scope: scope, indexPath: filepath.Join(cfg.Directory, key+".session"), namespace: Namespace(scope)}
 	lock, err := s.Lock(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer lock.Close()
-	if _, err := s.Load(); errors.Is(err, os.ErrNotExist) {
-		if err := s.Save(Index{Format: 1, Scope: scope}); err != nil {
+	idx, err := s.Load()
+	if errors.Is(err, os.ErrNotExist) {
+		if err := s.initializeHistory(); err != nil {
 			return nil, err
 		}
-	} else if err != nil {
+		if err := s.Save(Index{Format: indexFormat, Scope: scope}); err != nil {
+			return nil, err
+		}
+		return s, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkHistory(idx); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-func (s *Store) NewRunID() contract.RunID {
-	var nonce [16]byte
-	rand.Read(nonce[:])
-	return contract.RunID(s.namespace + "." + hex.EncodeToString(nonce[:]))
+func Namespace(scope Scope) string {
+	key, _ := durable.Digest(scope)
+	return key
 }
 
-func (s *Store) Owns(id contract.RunID) bool {
-	suffix, ok := strings.CutPrefix(string(id), s.namespace+".")
+func NewRunID(namespace string) contract.RunID {
+	var nonce [16]byte
+	rand.Read(nonce[:])
+	return contract.RunID(namespace + "." + hex.EncodeToString(nonce[:]))
+}
+
+func Owns(namespace string, id contract.RunID) bool {
+	suffix, ok := strings.CutPrefix(string(id), namespace+".")
 	return ok && len(suffix) == 32 && strings.IndexFunc(suffix, func(r rune) bool {
 		return (r < 'a' || r > 'f') && (r < '0' || r > '9')
 	}) < 0
 }
+
+func (s *Store) NewRunID() contract.RunID    { return NewRunID(s.namespace) }
+func (s *Store) Owns(id contract.RunID) bool { return Owns(s.namespace, id) }
 
 func (s *Store) Lock(ctx context.Context) (*os.File, error) {
 	lock, err := durable.LockContext(ctx, s.indexPath)
@@ -160,7 +170,7 @@ func (s *Store) Load() (Index, error) {
 	if err := durable.Read(s.indexPath, &idx); err != nil {
 		return idx, storageError(err)
 	}
-	if idx.Format != 1 || idx.Version != uint64(len(idx.Receipts)) {
+	if idx.Version != uint64(len(idx.Receipts)) || !validHistoryOffsets(idx) {
 		return idx, ErrStorage
 	}
 	if idx.Scope != s.scope {
@@ -194,7 +204,8 @@ func (s *Store) CheckCapacity(idx Index, p Pending) error {
 	idx.Pending = &p
 	for _, next := range []Index{idx, {
 		Format: idx.Format, Scope: idx.Scope, Version: idx.Version + 1,
-		Receipts: append(idx.Receipts, Receipt{RunID: p.Request.ID, Version: idx.Version + 1, Digest: p.RequestDigest}),
+		Receipts:    append(idx.Receipts, Receipt{RunID: p.Request.ID, Version: idx.Version + 1, Digest: p.RequestDigest}),
+		HistoryEnds: append(idx.HistoryEnds, maxHistoryOffset),
 	}} {
 		data, err := json.Marshal(next)
 		if err != nil {
@@ -246,7 +257,7 @@ func (s *Store) ReadTurn(idx Index, version uint64) (Turn, error) {
 		return Turn{}, ErrVersion
 	}
 	receipt := idx.Receipts[version-1]
-	turn, err := s.readTurn(receipt.RunID)
+	turn, err := s.readHistoryTurn(idx, version)
 	if err != nil {
 		return Turn{}, err
 	}
@@ -256,11 +267,15 @@ func (s *Store) ReadTurn(idx Index, version uint64) (Turn, error) {
 	return turn, nil
 }
 
-func (s *Store) readTurn(id contract.RunID) (Turn, error) {
+func (s *Store) readSealedTurn(id contract.RunID) (Turn, error) {
 	var turn Turn
 	if err := durable.Read(s.turnPath(id), &turn); err != nil {
 		return Turn{}, storageError(err)
 	}
+	return s.verifyTurn(id, turn)
+}
+
+func (s *Store) verifyTurn(id contract.RunID, turn Turn) (Turn, error) {
 	digest, err := resultDigest(turn.Outcome, turn.Messages)
 	if err != nil || turn.Scope != s.scope || turn.RunID != id || turn.Digest != digest || !validDigest(turn.RequestDigest) {
 		return Turn{}, ErrStorage
@@ -269,10 +284,7 @@ func (s *Store) readTurn(id contract.RunID) (Turn, error) {
 }
 
 func resultDigest(outcome contract.RunOutcome, messages []contract.Message) (string, error) {
-	return durable.Digest(struct {
-		Outcome  contract.RunOutcome
-		Messages []contract.Message
-	}{outcome, messages})
+	return api.ResultDigest(outcome, messages)
 }
 
 func validDigest(value string) bool {

@@ -250,13 +250,13 @@ func (s *Retained) reap(c *artifactCatalog, now time.Time) error {
 }
 
 func (s *Retained) Begin(ctx context.Context, call contract.ArtifactCall) (uint64, error) {
-	admission, ok := contract.ArtifactAdmissionFrom(ctx)
-	if !ok || call.Owner.Runner == "" || call.Owner.Subject == "" || call.Owner.RunID == "" ||
+	admission, err := contract.VerifyArtifactAccess(ctx, contract.ArtifactReserve, call, contract.ArtifactRef{})
+	if err != nil || call.Owner.Runner == "" || call.Owner.Subject == "" || call.Owner.RunID == "" ||
 		call.CallID == "" || call.Tool == "" || call.MaxBytes == 0 || !time.Now().Before(admission.Deadline) {
 		return 0, contract.ErrAccessDenied
 	}
 	var limit uint64
-	err := s.withCatalog(ctx, func(c *artifactCatalog) error {
+	err = s.withCatalog(ctx, func(c *artifactCatalog) error {
 		if err := s.reap(c, time.Now()); err != nil {
 			return err
 		}
@@ -285,18 +285,18 @@ func (s *Retained) Begin(ctx context.Context, call contract.ArtifactCall) (uint6
 
 func (s *Retained) Settle(ctx context.Context, call contract.ArtifactCall, refs []contract.ArtifactRef) (uint64, error) {
 	if len(refs) == 1 {
-		publish, err := s.PrepareArtifactPublication(ctx, call, refs[0])
+		publish, err := s.prepareArtifactPublication(ctx, contract.ArtifactPublish, call, refs[0])
 		if err != nil {
 			return 0, err
 		}
 		return publish(ctx)
 	}
-	admission, ok := contract.ArtifactAdmissionFrom(ctx)
-	if !ok || len(refs) != 0 {
+	admission, err := contract.VerifyArtifactAccess(ctx, contract.ArtifactDiscard, call, contract.ArtifactRef{})
+	if err != nil || len(refs) != 0 {
 		return 0, contract.ErrArtifactReceipt
 	}
 	var used uint64
-	err := s.withCatalog(ctx, func(c *artifactCatalog) error {
+	err = s.withCatalog(ctx, func(c *artifactCatalog) error {
 		id := artifactCallID(call)
 		e, exists := c.Entries[id]
 		if !exists {

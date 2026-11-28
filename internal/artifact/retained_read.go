@@ -110,6 +110,9 @@ func (f sealedFiles) verify(ctx context.Context) error {
 }
 
 func (s *Retained) CheckArtifact(ctx context.Context, owner contract.ArtifactOwner, ref contract.ArtifactRef) error {
+	if _, err := contract.VerifyArtifactAccess(ctx, contract.ArtifactCheck, contract.ArtifactCall{Owner: owner}, ref); err != nil {
+		return err
+	}
 	f, err := s.openSealed(ctx, owner, ref, true)
 	if err != nil {
 		return err
@@ -119,8 +122,13 @@ func (s *Retained) CheckArtifact(ctx context.Context, owner contract.ArtifactOwn
 }
 
 func (s *Retained) PrepareArtifactPublication(ctx context.Context, call contract.ArtifactCall, ref contract.ArtifactRef) (func(context.Context) (uint64, error), error) {
-	admission, ok := contract.ArtifactAdmissionFrom(ctx)
-	if !ok || ref.ID != s.id+artifactCallID(call) || !matchesArtifactKey(call, admission.Key, admission.Key.AdmissionEpoch) {
+	return s.prepareArtifactPublication(ctx, contract.ArtifactPreparePublication, call, ref)
+}
+
+func (s *Retained) prepareArtifactPublication(ctx context.Context, op contract.ArtifactOperation, call contract.ArtifactCall, ref contract.ArtifactRef) (func(context.Context) (uint64, error), error) {
+	admission, err := contract.VerifyArtifactAccess(ctx, op, call, ref)
+	key := admission.ReceiptKey
+	if err != nil || ref.ID != s.id+artifactCallID(call) || !matchesArtifactKey(call, key, key.AdmissionEpoch) {
 		return nil, contract.ErrAccessDenied
 	}
 	f, err := s.openSealed(ctx, call.Owner, ref, false)
@@ -129,7 +137,7 @@ func (s *Retained) PrepareArtifactPublication(ctx context.Context, call contract
 	}
 	defer f.close()
 	e := f.entry
-	if e.Call != call || e.Key != admission.Key || e.Epoch != admission.Key.AdmissionEpoch || e.Epoch > admission.Epoch ||
+	if e.Call != call || e.Key != key || e.Epoch != key.AdmissionEpoch || e.Epoch > admission.Epoch ||
 		!e.Deadline.Equal(admission.Deadline) || !time.Now().Before(e.Deadline) {
 		return nil, contract.ErrArtifactReceipt
 	}
@@ -138,9 +146,13 @@ func (s *Retained) PrepareArtifactPublication(ctx context.Context, call contract
 	}
 	return func(commitCtx context.Context) (uint64, error) {
 		err := s.withCatalog(commitCtx, func(c *artifactCatalog) error {
+			access, err := contract.VerifyArtifactAccess(commitCtx, contract.ArtifactPublish, call, ref)
+			if err != nil || access != admission {
+				return contract.ErrAccessDenied
+			}
 			id := artifactCallID(call)
 			current := c.Entries[id]
-			if !sameRef(current.Ref, ref) || current.Key != admission.Key ||
+			if !sameRef(current.Ref, ref) || current.Key != key ||
 				!time.Now().Before(minDeadline(current.Deadline, ref.ExpiresAt)) ||
 				!unchangedArtifactFile(s.body(current), f.bodyInfo) || !unchangedArtifactFile(s.checks(current), f.checksInfo) {
 				return contract.ErrArtifactUnavailable
@@ -153,7 +165,7 @@ func (s *Retained) PrepareArtifactPublication(ctx context.Context, call contract
 			}
 			current.Published = true
 			c.Entries[id] = current
-			_, err := durable.Write(s.catalogPath(), *c)
+			_, err = durable.Write(s.catalogPath(), *c)
 			return err
 		})
 		if err != nil {
@@ -176,6 +188,9 @@ func unchangedArtifactFile(path string, previous os.FileInfo) bool {
 }
 
 func (s *Retained) ReadArtifact(ctx context.Context, owner contract.ArtifactOwner, ref contract.ArtifactRef, offset, maxBytes uint64) (contract.ArtifactPage, error) {
+	if _, err := contract.VerifyArtifactAccess(ctx, contract.ArtifactRead, contract.ArtifactCall{Owner: owner}, ref); err != nil {
+		return contract.ArtifactPage{}, err
+	}
 	if offset > ref.SizeBytes || maxBytes == 0 {
 		return contract.ArtifactPage{}, contract.ErrArtifactUnavailable
 	}
