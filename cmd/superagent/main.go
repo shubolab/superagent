@@ -13,6 +13,7 @@ import (
 	"time"
 
 	sdk "github.com/shubolab/superagent"
+	"github.com/shubolab/superagent/internal/durable"
 	"github.com/shubolab/superagent/internal/tui"
 )
 
@@ -37,6 +38,7 @@ type terminalAssembly struct {
 func runCommand(ctx context.Context, args []string, start func(context.Context, terminalAssembly) error) error {
 	flags := flag.NewFlagSet("superagent", flag.ContinueOnError)
 	model := flags.String("model", os.Getenv("ANTHROPIC_MODEL"), "Anthropic model ID")
+	discardThinking := flags.Bool("discard-thinking", false, "discard thinking blocks for a compatible gateway")
 	state := flags.String("state-dir", "", "local state directory")
 	workspace := flags.String("workspace", "", "explicit read-only root for file search")
 	parallel := flags.Int("parallel", 1, "concurrent session Runs (1 or 2)")
@@ -82,13 +84,23 @@ func runCommand(ctx context.Context, args []string, start func(context.Context, 
 	if credential == "" {
 		return errors.New("需要 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN")
 	}
+	endpoint := os.Getenv("ANTHROPIC_BASE_URL")
+	binding, err := durable.Digest(struct {
+		Model           string
+		Endpoint        string
+		Authentication  sdk.AnthropicAuthentication
+		DiscardThinking bool
+	}{*model, endpoint, auth, *discardThinking})
+	if err != nil {
+		return err
+	}
 	bindings, err := sdk.NewModelBindings(ctx, sdk.ModelFactoryConfig{
 		Providers: map[sdk.ProviderRef]sdk.ProviderConfig{"anthropic": {
-			Adapter: "messages", Endpoint: os.Getenv("ANTHROPIC_BASE_URL"), CredentialRef: "environment",
+			Adapter: "messages", Endpoint: endpoint, CredentialRef: "environment",
 		}},
 		Models: map[sdk.ModelRef]sdk.ModelBindingConfig{"chat": {Provider: "anthropic", ModelID: *model}},
 		Adapters: map[string]sdk.ModelAdapter{"messages": sdk.NewAnthropicMessagesAdapterWithOptions(sdk.AnthropicMessagesOptions{
-			Authentication: auth, MaxOutputTokens: 4096,
+			Authentication: auth, MaxOutputTokens: 4096, DiscardThinking: *discardThinking,
 		})},
 	}, environmentCredential(credential))
 	if err != nil {
@@ -106,7 +118,7 @@ func runCommand(ctx context.Context, args []string, start func(context.Context, 
 	runner := sdk.RunnerConfig{
 		AllowedModels: map[sdk.SubjectID][]sdk.ModelRef{"terminal": {"chat"}},
 		DefaultBudget: budget, BudgetCaps: budget, ObserveBufferBytes: 256 << 10, ResultRetention: 5 * time.Minute,
-		Recovery:   &sdk.RecoveryConfig{Directory: filepath.Join(directory, "runs"), BindingVersion: "terminal-v1", ReconcileTimeout: time.Second},
+		Recovery:   &sdk.RecoveryConfig{Directory: filepath.Join(directory, "runs"), BindingVersion: "terminal-v1-" + binding, ReconcileTimeout: time.Second},
 		Scheduling: &sdk.SessionSchedulingConfig{MaxActiveRuns: *parallel, MaxQueuedRuns: 2, MaxQueueWait: 30 * time.Second},
 	}
 	cfg := sdk.MeshConfig{

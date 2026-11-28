@@ -1,6 +1,6 @@
 # SuperAgent
 
-SuperAgent 是一个从零设计的 Go Agent 底座。独立 TUI 和 Go SDK 共用一套执行契约，独立对话可以同时推进、流式回复和分别取消。组件通过 Mesh 调用本地或远程实现，需要隔离的工作可以交给沙箱执行。
+SuperAgent 是一个 Go Agent 底座。独立 TUI 和 Go SDK 共用进程内运行器，独立对话可以同时推进、流式回复和分别取消。当前提供本机只读工作区、有界搜索、持久恢复，以及经 mTLS 连接的远程工具。运行器、工具和执行环境支持宿主替换绑定。
 
 项目处于设计评审阶段。
 
@@ -12,3 +12,5 @@ SuperAgent 是一个从零设计的 Go Agent 底座。独立 TUI 和 Go SDK 共�
 `OpenSession` 默认将每个会话的历史写入一个 `.session.jsonl` 文件，每行是一轮已提交的 Run。宿主可用 `OpenSessionWithStore` 注入自己的 [session.Store](session/store.go)。
 
 配置 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN` 后，运行 `go run ./cmd/superagent -model <模型 ID>` 打开双会话终端。默认一个运行名额，可用 `-parallel 2` 同时运行两条会话。
+
+兼容网关通过 `ANTHROPIC_BASE_URL` 配置。对已验证可省略思考块的网关显式加 `-discard-thinking`。恢复在途 Run 时使用原模型、端点和适配模式。升级前以通用标识保存、缺少原模型身份的在途 Run 会保留为待核对。

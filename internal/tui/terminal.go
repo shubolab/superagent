@@ -42,7 +42,9 @@ func (a *app) terminal(in, out *os.File) (err error) {
 			}
 		}
 	}()
-	ctx, cancel := context.WithCancel(a.ctx)
+	parent := a.ctx
+	// Keep the UI alive long enough to receive withdrawal confirmations on shutdown.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	defer cancel()
 	a.ctx = ctx
 	keys := readKeys(ctx, in)
@@ -53,7 +55,8 @@ func (a *app) terminal(in, out *os.File) (err error) {
 			return err
 		}
 		select {
-		case <-ctx.Done():
+		case <-parent.Done():
+			a.shutdown()
 			return nil
 		case key, ok := <-keys:
 			if !ok || key == '\x04' || key == '\x03' {

@@ -27,10 +27,85 @@ func TestSearchAcceptance(t *testing.T) {
 		{"5-recover-receipt", searchRecoverReceipt},
 		{"6-settled-and-terminal", searchSettledAndTerminal},
 		{"7-untrusted-receipt", searchUntrustedReceipt},
+		{"signal-exit", commandSignalExit},
+		{"model-binding", commandRecoveryModelBinding},
+		{"gateway-thinking", commandGatewayThinking},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, binary) })
 	}
+}
+
+func commandSignalExit(t *testing.T, binary string) {
+	s := newSearchCase(t, binary)
+	old := s.startArgs("", []string{"-model", "loopback-search", "-state-dir", s.state, "-parallel", "1"})
+	old.ready()
+	old.send("hold-a\r")
+	s.wire.next("hold-a")
+	idx, err := s.store("甲").Load()
+	must(t, err)
+	if idx.Pending == nil {
+		t.Fatal("active Run has no reservation")
+	}
+	id := idx.Pending.Request.ID
+	old.send("\tqueue-b\r")
+	old.expect("[乙 · 排队中]")
+	must(t, old.cmd.Process.Signal(syscall.SIGTERM))
+	if err := old.exited(); err != nil || !strings.Contains(old.tail, "乙 · 未发送") {
+		t.Fatalf("SIGTERM did not confirm queue withdrawal: %v, %q", err, old.tail)
+	}
+	reopened := s.start("", "")
+	reopened.expect("[甲 · 可继续]", "乙 · 空闲", "RunID "+string(id))
+	s.index("甲", 0, id)
+	s.index("乙", 0, "")
+	s.wire.count("", 1)
+	reopened.stop(false)
+}
+
+func commandRecoveryModelBinding(t *testing.T, binary string) {
+	s := newSearchCase(t, binary)
+	old := s.start("", "")
+	old.ready()
+	old.send("original-model\r")
+	s.wire.next("original-model")
+	idx, err := s.store("甲").Load()
+	must(t, err)
+	if idx.Pending == nil {
+		t.Fatal("original model Run has no reservation")
+	}
+	id := idx.Pending.Request.ID
+	old.stop(true)
+
+	changed := s.startArgs("", []string{"-model", "different-model", "-state-dir", s.state})
+	changed.expect("[甲 · 待核对]", "乙 · 空闲", "RunID "+string(id))
+	changed.send("\r\tnew-session\r")
+	s.wire.next("new-session").answer("new-model-ready")
+	changed.expect("[乙 · 已完成]", "new-model-ready")
+	s.index("甲", 0, id)
+	s.index("乙", 1, "")
+	s.wire.count("", 2)
+	changed.stop(false)
+
+	reopened := s.start("", "")
+	reopened.expect("[甲 · 可继续]", "RunID "+string(id))
+	reopened.stop(false)
+}
+
+func commandGatewayThinking(t *testing.T, binary string) {
+	s := newSearchCase(t, binary)
+	cli := s.startArgs("", []string{"-model", "loopback-search", "-state-dir", s.state, "-discard-thinking"})
+	cli.ready()
+	cli.send("check-status\r")
+	thinking := wireEvent("content_block_start", map[string]any{"index": 0, "content_block": map[string]any{
+		"type": "thinking", "thinking": "private provider content",
+	}}) + wireBlockEnd(0)
+	s.wire.next("check-status").reply <- wireReply{prefix: wireStart + thinking + wireText(1, "status-ready") + wireFinish("end_turn")}
+	frame := cli.expect("[甲 · 已完成]", "status-ready")
+	if strings.Contains(frame, "private provider content") {
+		t.Fatalf("thinking escaped adapter: %q", frame)
+	}
+	s.index("甲", 1, "")
+	cli.stop(false)
 }
 
 func searchCommandWorkspace(t *testing.T, binary string) {

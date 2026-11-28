@@ -98,7 +98,7 @@ flowchart TB
     class environment,local,sandbox,remote placement;
 ```
 
-运行器和执行环境可分别部署。工具领用本次调用的环境权限，在获授的工作区和配额内执行。 [执行环境图解](execution-environment.md) · [工具调用与回执图解](tool-call-lifecycle.md)
+当前交付使用进程内运行器和本机只读环境。远程工具通过 mTLS 接入，并在提供方侧访问工作区。图中的沙箱、远程运行器和远程执行环境是后续绑定位置。工具按次领用环境权限。 [执行环境图解](execution-environment.md) · [工具调用与回执图解](tool-call-lifecycle.md)
 
 ## 阶段与取舍
 
