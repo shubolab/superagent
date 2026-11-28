@@ -15,6 +15,19 @@ type sessionTestSubject struct{}
 
 func sessionTestClient(t *testing.T, root, binding string, retention time.Duration, model ModelProvider, tool Tool) *Client {
 	t.Helper()
+	m, err := NewMesh(sessionTestMeshConfig(t, root, binding, retention, model, tool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(m, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+func sessionTestMeshConfig(t *testing.T, root, binding string, retention time.Duration, model ModelProvider, tool Tool) MeshConfig {
+	t.Helper()
 	if !durable.Supported {
 		t.Skip("local session storage requires process locks")
 	}
@@ -40,7 +53,7 @@ func sessionTestClient(t *testing.T, root, binding string, retention time.Durati
 			Tool: receiptTool,
 		}}
 	}
-	m, err := NewMesh(MeshConfig{
+	return MeshConfig{
 		LocalRunners: map[RunnerRef]RunnerConfig{"main": cfg},
 		LocalModels:  map[ModelRef]ModelProvider{"chat": model},
 		LocalTools:   tools,
@@ -50,15 +63,7 @@ func sessionTestClient(t *testing.T, root, binding string, retention time.Durati
 			}
 			return "owner", nil
 		},
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	client, err := NewClient(m, "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return client
 }
 
 func sessionTestContext(t *testing.T) context.Context {

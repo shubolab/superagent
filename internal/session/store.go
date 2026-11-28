@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	ErrBusy              = errors.New("session has an uncommitted run")
+	ErrBusy              = contract.ErrSessionBusy
 	ErrCapacity          = errors.New("session capacity reached")
 	ErrHistoryLimit      = errors.New("latest turn exceeds the session history window")
 	ErrOwnership         = errors.New("run or session ownership mismatch")

@@ -88,6 +88,10 @@ func TestStageCSessionChild(t *testing.T) {
 	}
 	ctx := sessionTestContext(t)
 	action := os.Getenv("SUPERAGENT_SESSION_TEST_ACTION")
+	if action == "schedule-source" {
+		runScheduleSource(t, ctx, root)
+		return
+	}
 	if action == "tool-crash" || action == "tool-recover" {
 		f := defaultRecoveryFixture(root)
 		if action == "tool-crash" {

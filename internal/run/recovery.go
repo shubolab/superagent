@@ -14,6 +14,7 @@ import (
 	"github.com/shubolab/superagent/internal/durable"
 	"github.com/shubolab/superagent/internal/mesh"
 	"github.com/shubolab/superagent/internal/remotetool"
+	"github.com/shubolab/superagent/internal/schedule"
 )
 
 type runIdentity struct {
@@ -288,6 +289,11 @@ func (r *Runner) startRecoverable(ctx context.Context, subject contract.SubjectI
 		ArtifactStoreID:  r.recoveryArtifactStore(req),
 		ReconcileTimeout: r.recovery.ReconcileTimeout, Budget: budget, Balance: budget, Step: 1, Messages: s.messages,
 	}
+	permit := r.schedulingPermit(ctx, subject, req.ID)
+	if r.scheduler != nil && permit == nil {
+		s.cancel()
+		return "", contract.ErrScheduleAdmissionRequired
+	}
 	var shared *lease
 	if req.Takeover {
 		authorityNow, err := r.leaseClock()
@@ -303,6 +309,9 @@ func (r *Runner) startRecoverable(ctx context.Context, subject contract.SubjectI
 	if err != nil {
 		s.cancel()
 		if renamed {
+			if permit != nil {
+				r.reconcileScheduledStart(permit, path, identity, digest)
+			}
 			return "", contract.ErrStartOutcomeUnknown
 		}
 		return "", fmt.Errorf("%w: %v", contract.ErrRecoveryStorage, err)
@@ -314,6 +323,7 @@ func (r *Runner) startRecoverable(ctx context.Context, subject contract.SubjectI
 	} else {
 		s.attachLease(shared)
 	}
+	s.attachPermit(permit)
 	r.runs[runKey{subject: subject, id: req.ID}] = s
 	go r.generate(s, subject)
 	return req.ID, nil
@@ -331,6 +341,12 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	var replacing *schedule.Permit
+	defer func() {
+		if replacing != nil {
+			replacing.Release()
+		}
+	}()
 	key := runKey{subject: subject, id: id}
 	if s := r.runs[key]; s != nil {
 		if s.checkpoint == nil || s.expired(time.Now(), r.retention) {
@@ -351,6 +367,11 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 				}
 				return id, nil
 			}
+			// The admitted recovery may replace this worker under the same Run permit.
+			if s.permit != nil && s.permit == r.schedulingPermit(ctx, subject, id) {
+				replacing = s.permit
+				s.permit = nil
+			}
 			s.failCheckpointLocked(err)
 		}
 		s.mu.Unlock()
@@ -363,7 +384,12 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 	}
 	var lock *os.File
 	var shared *lease
+	var permit *schedule.Permit
 	if record.Result == nil {
+		permit = r.schedulingPermit(ctx, subject, id)
+		if r.scheduler != nil && permit == nil {
+			return "", contract.ErrScheduleAdmissionRequired
+		}
 		if record.Request.Takeover {
 			if r.recovery.Takeover == nil {
 				return "", contract.ErrRecoveryUnavailable
@@ -426,6 +452,10 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 	if shared != nil {
 		s.attachLease(shared)
 	}
+	s.attachPermit(permit)
+	if permit == replacing {
+		replacing = nil
+	}
 	go r.generate(s, subject)
 	return id, nil
 }
@@ -460,6 +490,7 @@ func (s *state) failCheckpointLocked(err error) {
 	s.checkpointErr = errors.Join(contract.ErrRecoveryStorage, err)
 	s.cancel()
 	s.events.abandon()
+	s.releasePermitLocked()
 	close(s.done)
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+
+	"github.com/shubolab/superagent/internal/mesh"
 )
 
 // CommitRun publishes the original terminal Wait delta once and returns its durable receipt.
@@ -19,15 +21,10 @@ func (s *Session) CommitRun(ctx context.Context, id RunID) (SessionCommit, error
 	if receipt, ready, err := s.publish(ctx, id, nil); ready || err != nil {
 		return receipt, err
 	}
-	_, err = s.recoverPending(ctx, runner, id)
+	result, err := s.resultForCommit(ctx, runner, id)
 	if err == nil {
-		var result Result
-		result, err = runner.Wait(ctx, s.scope.Subject, id)
-		if err == nil {
-			receipt, _, err := s.publish(ctx, id, &result)
-			return receipt, err
-		}
-		err = sessionResultError(err)
+		receipt, _, err := s.publish(ctx, id, &result)
+		return receipt, err
 	}
 	if ctx.Err() == nil {
 		// Another committer may have already sealed or published while this caller checked the Run.
@@ -36,6 +33,31 @@ func (s *Session) CommitRun(ctx context.Context, id RunID) (SessionCommit, error
 		}
 	}
 	return SessionCommit{}, err
+}
+
+func (s *Session) resultForCommit(ctx context.Context, runner mesh.SessionRunner, id RunID) (Result, error) {
+	if runner.SessionScheduler() != nil {
+		idx, pending, checkpoint, err := s.scheduledCheckpoint(runner, id)
+		if err != nil {
+			return Result{}, err
+		}
+		if checkpoint.Result != nil {
+			if _, err := s.checkedPendingRequest(ctx, runner, idx, pending); err != nil {
+				return Result{}, err
+			}
+			return *checkpoint.Result, nil
+		}
+		if _, err := s.admitRecovery(ctx, runner, pending); err != nil {
+			return Result{}, err
+		}
+	} else if _, err := s.recoverRun(ctx, runner, id); err != nil {
+		return Result{}, err
+	}
+	result, err := runner.Wait(ctx, s.scope.Subject, id)
+	if err != nil {
+		return Result{}, sessionResultError(err)
+	}
+	return result, nil
 }
 
 func (s *Session) publish(ctx context.Context, id RunID, result *Result) (SessionCommit, bool, error) {

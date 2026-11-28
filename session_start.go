@@ -22,6 +22,13 @@ func (s *Session) Start(ctx context.Context, req StartRequest) (*Run, error) {
 		return nil, ErrInvalidRequest
 	}
 	req.Recoverable = true
+	if runner.SessionScheduler() != nil {
+		return s.startScheduled(ctx, runner, req)
+	}
+	return s.start(ctx, runner, req)
+}
+
+func (s *Session) start(ctx context.Context, runner mesh.SessionRunner, req StartRequest) (*Run, error) {
 	lock, err := s.store.AdmissionLock(ctx, req.ID)
 	if err != nil {
 		return nil, err
@@ -43,6 +50,13 @@ func (s *Session) Recover(ctx context.Context, id RunID) (*Run, error) {
 }
 
 func (s *Session) recoverPending(ctx context.Context, runner mesh.SessionRunner, id RunID) (*Run, error) {
+	if runner.SessionScheduler() != nil {
+		return s.recoverScheduled(ctx, runner, id)
+	}
+	return s.recoverRun(ctx, runner, id)
+}
+
+func (s *Session) recoverRun(ctx context.Context, runner mesh.SessionRunner, id RunID) (*Run, error) {
 	lock, err := s.store.AdmissionLock(ctx, id)
 	if err != nil {
 		return nil, err
@@ -105,22 +119,15 @@ func (s *Session) resume(ctx context.Context, runner mesh.SessionRunner, id RunI
 	if err != nil {
 		return nil, err
 	}
-	binding, err := runner.SessionBinding(ctx)
+	req, err := s.checkedPendingRequest(ctx, runner, idx, pending)
+	if err != nil {
+		return nil, err
+	}
+	status, err := runner.SessionCheckpoint(s.scope.Subject, id, pending.RequestDigest)
 	if err != nil {
 		return nil, sessionResultError(err)
 	}
-	if binding != pending.Binding {
-		return nil, sessionResultError(ErrRecoveryBinding)
-	}
-	req, err := s.frozenRequest(runner, idx, pending, pending.Request)
-	if err != nil {
-		return nil, sessionResultError(err)
-	}
-	admitted, err := runner.SessionCheckpoint(s.scope.Subject, id, pending.RequestDigest)
-	if err != nil {
-		return nil, sessionResultError(err)
-	}
-	if admitted {
+	if status.Exists {
 		if _, err := runner.Recover(ctx, s.scope.Subject, id); err != nil {
 			return nil, sessionResultError(err)
 		}
@@ -143,11 +150,26 @@ func (s *Session) resume(ctx context.Context, runner mesh.SessionRunner, id RunI
 	// caller cancelled, while keeping a bounded time to acquire and write the index.
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer cancel()
-	admitted, probeErr := runner.SessionCheckpoint(s.scope.Subject, id, pending.RequestDigest)
-	if probeErr != nil || admitted {
+	status, probeErr := runner.SessionCheckpoint(s.scope.Subject, id, pending.RequestDigest)
+	if probeErr != nil || status.Exists {
 		return nil, errors.Join(err, ErrStartOutcomeUnknown, probeErr)
 	}
 	return nil, errors.Join(err, s.setAttempted(cleanup, id, false))
+}
+
+func (s *Session) checkedPendingRequest(ctx context.Context, runner mesh.SessionRunner, idx session.Index, pending session.Pending) (StartRequest, error) {
+	binding, err := runner.SessionBinding(ctx)
+	if err != nil {
+		return StartRequest{}, sessionResultError(err)
+	}
+	if binding != pending.Binding {
+		return StartRequest{}, sessionResultError(ErrRecoveryBinding)
+	}
+	req, err := s.frozenRequest(runner, idx, pending, pending.Request)
+	if err != nil {
+		return StartRequest{}, sessionResultError(err)
+	}
+	return req, nil
 }
 
 func (s *Session) setAttempted(ctx context.Context, id RunID, attempted bool) error {

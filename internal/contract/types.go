@@ -24,6 +24,7 @@ type Budget struct {
 
 type RunnerConfig struct {
 	Recovery           *RecoveryConfig
+	Scheduling         *SessionSchedulingConfig
 	AllowedModels      map[SubjectID][]ModelRef
 	ContextPolicies    map[ModelRef]ModelContextPolicy
 	AllowedTools       map[SubjectID]map[ToolRef]ToolPermission

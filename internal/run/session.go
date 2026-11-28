@@ -11,6 +11,7 @@ import (
 
 	"github.com/shubolab/superagent/internal/contract"
 	"github.com/shubolab/superagent/internal/durable"
+	"github.com/shubolab/superagent/internal/schedule"
 )
 
 // SessionBinding identifies the retained local checkpoint store and assembly.
@@ -46,34 +47,85 @@ func (r *Runner) SessionRequestDigest(req contract.StartRequest) (string, error)
 	return durable.Digest(freezeStart(req))
 }
 
-// SessionCheckpoint distinguishes absent, compatible, expired and invalid records.
+func (r *Runner) SessionScheduler() *schedule.Scheduler { return r.scheduler }
+
+// SessionCheckpoint distinguishes missing, continuable and terminal records.
 // A missing file alone is insufficient to retry an attempted admission.
-func (r *Runner) SessionCheckpoint(subject contract.SubjectID, id contract.RunID, digest string) (bool, error) {
+func (r *Runner) SessionCheckpoint(subject contract.SubjectID, id contract.RunID, digest string) (contract.SessionRunCheckpoint, error) {
+	var missing contract.SessionRunCheckpoint
 	if r.recovery == nil {
-		return false, contract.ErrRecoveryUnavailable
+		return missing, contract.ErrRecoveryUnavailable
 	}
 	path, identity := r.recoveryPath(subject, id)
 	record, err := readCheckpoint(path, identity)
 	if errors.Is(err, contract.ErrRunNotFound) {
 		r.mu.Lock()
 		_, running := r.runs[runKey{subject: subject, id: id}]
-		r.mu.Unlock()
 		if running {
-			return false, contract.ErrStartConflict
+			record, err = readCheckpoint(path, identity)
 		}
-		return false, nil
+		r.mu.Unlock()
+		if running && errors.Is(err, contract.ErrRunNotFound) {
+			return missing, contract.ErrStartConflict
+		}
+		if !running {
+			return missing, nil
+		}
 	}
 	if err != nil {
-		return false, err
+		return missing, err
 	}
 	if record.RequestDigest != digest {
-		return false, contract.ErrStartConflict
+		return missing, contract.ErrStartConflict
 	}
 	if record.BindingVersion != r.recovery.BindingVersion {
-		return false, contract.ErrRecoveryBinding
+		return missing, contract.ErrRecoveryBinding
 	}
 	if record.Result != nil && !time.Now().Before(record.FinishedAt.Add(r.retention)) {
-		return false, contract.ErrRunNotFound
+		return missing, contract.ErrRunNotFound
 	}
-	return true, nil
+	return contract.SessionRunCheckpoint{Exists: true, Result: record.Result}, nil
+}
+
+func (r *Runner) schedulingPermit(ctx context.Context, subject contract.SubjectID, id contract.RunID) *schedule.Permit {
+	if r.scheduler == nil {
+		return nil
+	}
+	return r.scheduler.Permit(ctx, subject, id)
+}
+
+// A failed directory sync can leave the initial checkpoint visible without a live Run.
+// Reconcile it locally, while a concurrent recovery may take over the same permit.
+func (r *Runner) reconcileScheduledStart(permit *schedule.Permit, path string, identity runIdentity, digest string) {
+	resolved := permit.MarkUncertain()
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-resolved:
+				return
+			case <-ticker.C:
+			}
+			if r.confirmIdleAdmission(permit, path, identity, digest) {
+				return
+			}
+		}
+	}()
+}
+
+func (r *Runner) confirmIdleAdmission(permit *schedule.Permit, path string, identity runIdentity, digest string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.runs[runKey{subject: identity.Subject, id: identity.ID}] != nil {
+		return false
+	}
+	record, err := readCheckpoint(path, identity)
+	if !errors.Is(err, contract.ErrRunNotFound) && (err != nil || record.RequestDigest != digest) {
+		return false
+	}
+	if err := durable.SyncDirectory(filepath.Dir(path)); err != nil {
+		return false
+	}
+	return permit.ConfirmStopped()
 }

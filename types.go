@@ -68,6 +68,7 @@ type (
 	SubjectID                   = contract.SubjectID
 	Budget                      = contract.Budget
 	RunnerConfig                = contract.RunnerConfig
+	SessionSchedulingConfig     = contract.SessionSchedulingConfig
 	StartRequest                = contract.StartRequest
 	Message                     = contract.Message
 	UserMessage                 = contract.UserMessage
@@ -160,6 +161,9 @@ var (
 	ErrRecoveryStorage               = contract.ErrRecoveryStorage
 	ErrRecoveryBinding               = contract.ErrRecoveryBinding
 	ErrRecoveryObservation           = contract.ErrRecoveryObservation
+	ErrScheduleQueueFull             = contract.ErrScheduleQueueFull
+	ErrScheduleQueueTimeout          = contract.ErrScheduleQueueTimeout
+	ErrScheduleAdmissionRequired     = contract.ErrScheduleAdmissionRequired
 	ErrArtifactUnavailable           = contract.ErrArtifactUnavailable
 	ErrArtifactCapacity              = contract.ErrArtifactCapacity
 	ErrArtifactOutputLimit           = contract.ErrArtifactOutputLimit

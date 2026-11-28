@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/shubolab/superagent/internal/contract"
+	"github.com/shubolab/superagent/internal/schedule"
 )
 
 type state struct {
@@ -15,6 +16,7 @@ type state struct {
 	compaction    *compactionState
 	checkpoint    *runCheckpoint
 	checkpointErr error
+	permit        *schedule.Permit
 	ctx           context.Context
 	cancel        context.CancelFunc
 	done          chan struct{}
@@ -124,5 +126,20 @@ func (s *state) publishFinishedLocked(cleanup contract.CleanupStatus) {
 	if s.result.Outcome != contract.TimedOut {
 		s.cancel()
 	}
+	s.releasePermitLocked()
 	close(s.done)
+}
+
+func (s *state) attachPermit(permit *schedule.Permit) {
+	if permit != nil {
+		permit.Attach()
+		s.permit = permit
+	}
+}
+
+func (s *state) releasePermitLocked() {
+	if s.permit != nil {
+		s.permit.Release()
+		s.permit = nil
+	}
 }

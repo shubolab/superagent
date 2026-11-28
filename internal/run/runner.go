@@ -18,6 +18,7 @@ import (
 	"github.com/shubolab/superagent/internal/contract"
 	"github.com/shubolab/superagent/internal/durable"
 	"github.com/shubolab/superagent/internal/mesh"
+	"github.com/shubolab/superagent/internal/schedule"
 )
 
 type OpenModel func(context.Context, contract.SubjectID, contract.ModelRequest) (contract.ModelStream, error)
@@ -42,6 +43,7 @@ type Runner struct {
 	defaultEnvironment   contract.EnvironmentRef
 	contextPolicies      map[contract.ModelRef]contract.ModelContextPolicy
 	recovery             *contract.RecoveryConfig
+	scheduler            *schedule.Scheduler
 	retainsArtifacts     bool
 	takeoverArtifacts    bool
 	artifactStoreID      string
@@ -89,6 +91,17 @@ func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open 
 		policies[ref] = policy
 	}
 	recovery := copyValue(cfg.Recovery)
+	var scheduler *schedule.Scheduler
+	if cfg.Scheduling != nil {
+		if recovery == nil {
+			return nil, fmt.Errorf("%w: session scheduling requires local recovery", contract.ErrInvalidConfiguration)
+		}
+		var err error
+		scheduler, err = schedule.New(*cfg.Scheduling)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid session scheduling limits", err)
+		}
+	}
 	if recovery != nil {
 		recovery.Takeover = copyValue(recovery.Takeover)
 		if recovery.Takeover != nil && recovery.Takeover.LeaseDuration <= 0 {
@@ -102,13 +115,16 @@ func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open 
 		}
 	}
 	return &Runner{
-		recovery: recovery, instance: rand.Text(), leaseClock: func() (time.Time, error) { return time.Now(), nil },
+		recovery: recovery, scheduler: scheduler, instance: rand.Text(), leaseClock: func() (time.Time, error) { return time.Now(), nil },
 		models: models, allowed: allowed, defaults: defaults, caps: caps, open: open, contextPolicies: policies,
 		observeBufferBytes: cfg.ObserveBufferBytes, retention: cfg.ResultRetention, runs: make(map[runKey]*state),
 	}, nil
 }
 
 func (r *Runner) Start(ctx context.Context, subject contract.SubjectID, req contract.StartRequest) (contract.RunID, error) {
+	if r.scheduler != nil && (!req.Recoverable || r.scheduler.Permit(ctx, subject, req.ID) == nil) {
+		return "", contract.ErrScheduleAdmissionRequired
+	}
 	if req.ID == "" || (req.Takeover && !req.Recoverable) || !utf8.ValidString(req.Instruction) || !utf8.ValidString(req.Input.Text) || !ValidHistory(req.History) {
 		return "", contract.ErrInvalidRequest
 	}
