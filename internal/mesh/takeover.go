@@ -10,6 +10,7 @@ import (
 type TakeoverGuard interface {
 	Admit(context.Context, MeshRequest) error
 	Matches(contract.RunScope) bool
+	RemoteOwner() contract.RemoteOwner
 	Publish(context.Context, contract.RunScope, contract.ReceiptKey, func() error) error
 }
 

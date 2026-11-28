@@ -20,7 +20,7 @@ func (l *TakeoverLocal) FencesWorkspace(ref contract.WorkspaceRef) bool {
 
 // PublishWorkspace appends staged bytes while Mesh holds the ownership lock.
 func (l *TakeoverLocal) PublishWorkspace(ctx context.Context, scope contract.CallScope, ref contract.EnvironmentGrantRef, data []byte) error {
-	if scope.Run.Epoch == 0 || len(data) == 0 || len(data) > contract.MaxWorkspacePublishBytes ||
+	if len(data) == 0 || len(data) > contract.MaxWorkspacePublishBytes ||
 		!contract.HasWorkspacePublication(ctx, scope, ref) {
 		return contract.ErrAccessDenied
 	}

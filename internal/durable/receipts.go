@@ -13,11 +13,13 @@ import (
 type ReceiptTool struct {
 	Directory string
 	Tool      contract.Tool
+	Execute   func(context.Context, contract.ToolRequest) (contract.ToolResult, contract.CleanupStatus, error)
 }
 
 type receiptRecord struct {
-	Key    contract.ReceiptKey
-	Result *contract.ToolResult
+	Key     contract.ReceiptKey
+	Result  *contract.ToolResult
+	Cleanup contract.CleanupStatus `json:",omitempty"`
 }
 
 func (t *ReceiptTool) path(key contract.ReceiptKey) string {
@@ -33,11 +35,20 @@ func (t *ReceiptTool) path(key contract.ReceiptKey) string {
 }
 
 func (t *ReceiptTool) Invoke(ctx context.Context, req contract.ToolRequest) (contract.ToolResult, error) {
-	empty := contract.ToolResult{}
 	key, recoverable := contract.InvocationReceiptKey(ctx)
 	if !recoverable {
 		return t.Tool.Invoke(ctx, req)
 	}
+	receipt, err := t.InvokeReceipt(ctx, key, req)
+	if err != nil {
+		return contract.ToolResult{}, err
+	}
+	return receipt.Result, nil
+}
+
+// InvokeReceipt executes and records one result before returning it to the transport.
+func (t *ReceiptTool) InvokeReceipt(ctx context.Context, key contract.ReceiptKey, req contract.ToolRequest) (contract.ToolReceipt, error) {
+	empty := contract.ToolReceipt{}
 	if key.RunID != req.RunID || key.CallID != req.CallID || key.Tool != req.Tool {
 		return empty, contract.ErrAccessDenied
 	}
@@ -56,7 +67,7 @@ func (t *ReceiptTool) Invoke(ctx context.Context, req contract.ToolRequest) (con
 		if record.Result == nil {
 			return empty, contract.ErrRecoveryUnavailable
 		}
-		return *record.Result, nil
+		return contract.ToolReceipt{Key: key, Result: *record.Result, Cleanup: record.Cleanup}, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return empty, err
@@ -68,26 +79,33 @@ func (t *ReceiptTool) Invoke(ctx context.Context, req contract.ToolRequest) (con
 	if _, err := Write(path, record); err != nil {
 		return empty, err
 	}
-	result, err := t.Tool.Invoke(ctx, req)
+	var result contract.ToolResult
+	var cleanup contract.CleanupStatus
+	if t.Execute != nil {
+		result, cleanup, err = t.Execute(ctx, req)
+	} else {
+		result, err = t.Tool.Invoke(ctx, req)
+	}
 	if err != nil {
 		return empty, err
 	}
-	if result.RunID != key.RunID || result.CallID != key.CallID ||
+	reply := contract.ToolReceipt{Key: key, Result: result, Cleanup: cleanup}
+	if !contract.ValidToolResult(result, key.RunID, key.CallID) ||
 		(result.State != contract.ToolExecutionKnown && result.State != contract.ToolExecutionNotExecuted) ||
 		(result.Completion != nil && (len(result.Completion.Artifacts) > 1 ||
 			uint64(len(result.Completion.Content)) > min(req.Limits.MaxResultBytes, MaxRecordBytes))) {
-		// An unknown result leaves the durable pending record intact.
-		return result, nil
+		return reply, nil
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil || uint64(len(encoded)) > req.Limits.MaxResultBytes {
-		return result, nil
+		return reply, nil
 	}
-	record.Result = &result
+	// Filesystem commits are independent of cancellation of the response connection.
+	record.Result, record.Cleanup = &result, cleanup
 	if _, err := Write(path, record); err != nil {
 		return empty, err
 	}
-	return result, nil
+	return reply, nil
 }
 
 func (t *ReceiptTool) QueryReceipt(ctx context.Context, key contract.ReceiptKey) (*contract.ToolReceipt, error) {
@@ -107,5 +125,15 @@ func (t *ReceiptTool) QueryReceipt(ctx context.Context, key contract.ReceiptKey)
 	if record.Result == nil {
 		return nil, nil
 	}
-	return &contract.ToolReceipt{Key: record.Key, Result: *record.Result}, nil
+	return &contract.ToolReceipt{Key: record.Key, Result: *record.Result, Cleanup: record.Cleanup}, nil
+}
+
+func ToolFingerprint(req contract.ToolRequest, path string) string {
+	digest, _ := Digest(struct {
+		Tool      contract.ToolRef
+		Arguments json.RawMessage
+		Path      string
+		Limits    contract.ToolLimits
+	}{req.Tool, req.Arguments, path, req.Limits})
+	return digest
 }

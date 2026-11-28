@@ -111,6 +111,9 @@ func (r *Runner) acquireTakeover(ctx context.Context, path string, identity runI
 		if c.BindingVersion != r.recovery.BindingVersion {
 			return contract.ErrRecoveryBinding
 		}
+		if err := r.validateRemoteBindings(*c); err != nil {
+			return err
+		}
 		if err := r.validateRecovery(identity.Subject, c.Request); err != nil {
 			return err
 		}
@@ -194,7 +197,15 @@ func (l *lease) Matches(scope contract.RunScope) bool {
 		scope.RunID == l.id.ID && scope.Epoch == l.owner.Epoch
 }
 
+func (l *lease) RemoteOwner() contract.RemoteOwner {
+	return contract.RemoteOwner{Instance: l.owner.Instance, Epoch: l.owner.Epoch}
+}
+
 func (l *lease) Admit(ctx context.Context, req mesh.MeshRequest) error {
+	return l.admit(ctx, req, false)
+}
+
+func (l *lease) admit(ctx context.Context, req mesh.MeshRequest, receiver bool) error {
 	return l.owned(ctx, func(c *checkpoint, _ time.Time) error {
 		if c.Stop != nil || !time.Now().Before(c.Deadline) {
 			return contract.ErrRecoveryOwnershipLost
@@ -213,7 +224,8 @@ func (l *lease) Admit(ctx context.Context, req mesh.MeshRequest) error {
 			return contract.ErrAccessDenied
 		}
 		if req.Operation == mesh.QueryReceipt {
-			if c.Intent == nil || !c.Intent.Admitted || c.Intent.Key != req.ReceiptKey {
+			if c.Intent == nil || c.Intent.Key != req.ReceiptKey ||
+				(!c.Intent.Admitted && (receiver || req.ReceiptKey.Remote == (contract.RemoteToolIdentity{}))) {
 				return contract.ErrAccessDenied
 			}
 			return nil
@@ -236,8 +248,11 @@ func (l *lease) Admit(ctx context.Context, req mesh.MeshRequest) error {
 			return nil
 		case mesh.Invoke:
 			if c.Intent.Admitted || req.ReceiptKey != c.Intent.Key || req.Tool.Limits != c.Intent.Limits ||
-				req.ReceiptKey.Fingerprint != toolFingerprint(req.Tool, e.Call.Path) {
+				req.ReceiptKey.Fingerprint != durable.ToolFingerprint(req.Tool, e.Call.Path) {
 				return contract.ErrAccessDenied
+			}
+			if req.ReceiptKey.Remote != (contract.RemoteToolIdentity{}) && !receiver {
+				return nil
 			}
 			c.Intent.Admitted = true
 			return l.write(c)

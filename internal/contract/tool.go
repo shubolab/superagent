@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"time"
+	"unicode/utf8"
 )
 
 type ToolRef string
@@ -221,6 +222,34 @@ func JSONObject(raw json.RawMessage) bool {
 		default:
 			return b == '{' && json.Valid(raw)
 		}
+	}
+	return false
+}
+
+func ValidToolResult(result ToolResult, run RunID, call CallID) bool {
+	if run == "" || result.RunID != run || result.CallID != call ||
+		(result.Reason != nil && (len(result.Reason.Code) == 0 || len(result.Reason.Code) > 64 || !utf8.ValidString(result.Reason.Code) ||
+			len(result.Reason.Message) > 256 || !utf8.ValidString(result.Reason.Message))) {
+		return false
+	}
+	switch result.State {
+	case ToolExecutionKnown:
+		if result.Completion == nil || len(result.Completion.Artifacts) > 1 || !utf8.ValidString(result.Completion.Content) {
+			return false
+		}
+		for _, a := range result.Completion.Artifacts {
+			if a.ID == "" || len(a.ID) > 128 || a.Version == "" || len(a.Version) > 128 || len(a.SHA256) != 64 || a.ExpiresAt.IsZero() || a.ExpiresAt.Year() > 9999 || a.ExpiresAt.Year() < 0 {
+				return false
+			}
+		}
+		switch result.Completion.Outcome {
+		case ToolSucceeded:
+			return result.Reason == nil
+		case ToolFailed, ToolCancelled:
+			return result.Reason != nil
+		}
+	case ToolExecutionNotExecuted, ToolExecutionUnknown:
+		return result.Completion == nil && result.Reason != nil
 	}
 	return false
 }

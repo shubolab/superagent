@@ -2,9 +2,9 @@ package run
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,6 +12,7 @@ import (
 	"github.com/shubolab/superagent/internal/contract"
 	"github.com/shubolab/superagent/internal/durable"
 	"github.com/shubolab/superagent/internal/mesh"
+	"github.com/shubolab/superagent/internal/remotetool"
 )
 
 type runIdentity struct {
@@ -35,6 +36,8 @@ type checkpoint struct {
 	RequestDigest    string
 	Permissions      map[contract.ToolRef]contract.ToolPermission
 	WorkspaceVersion string
+	RemoteBindings   map[contract.ToolRef]contract.RemoteToolIdentity `json:",omitempty"`
+	RemoteCleanup    contract.CleanupStatus                           `json:",omitempty"`
 	Deadline         time.Time
 	ReconcileTimeout time.Duration
 	ReconcileUntil   time.Time
@@ -116,7 +119,7 @@ func (c checkpoint) validPosition() bool {
 		return false
 	}
 	for i, result := range c.ToolResults {
-		if !validToolResult(result, c.Identity.ID, c.Pending.ToolCalls[i].CallID) || toolStatus(result) == contract.ToolStatusUnknown {
+		if !contract.ValidToolResult(result, c.Identity.ID, c.Pending.ToolCalls[i].CallID) || toolStatus(result) == contract.ToolStatusUnknown {
 			return false
 		}
 	}
@@ -134,7 +137,7 @@ func (c checkpoint) validPosition() bool {
 		key.Step == c.Step && key.CallID == call.CallID && key.Tool == call.Tool &&
 		key.BindingVersion == c.BindingVersion && key.WorkspaceVersion == c.WorkspaceVersion &&
 		key.Environment == environment.Ref && key.Workspace == environment.Workspace &&
-		key.Fingerprint == toolFingerprint(request, c.Intent.Path) &&
+		key.Fingerprint == durable.ToolFingerprint(request, c.Intent.Path) && key.Remote == c.RemoteBindings[call.Tool] &&
 		((c.Owner == nil && key.AdmissionEpoch == 0) || (c.Owner != nil && key.AdmissionEpoch > 0 && key.AdmissionEpoch <= c.Owner.Epoch)) &&
 		limits.MaxResultBytes > 0 && limits.MaxResultBytes <= c.Balance.Output && limits.MaxScanBytes <= c.Balance.Scan && limits.MaxRawOutputBytes <= c.Balance.Raw
 }
@@ -148,6 +151,26 @@ func recoveryLock(path string) (*os.File, error) {
 		return nil, fmt.Errorf("%w: %v", contract.ErrRecoveryStorage, err)
 	}
 	return lock, nil
+}
+
+func (r *Runner) remoteBindings(req contract.StartRequest) map[contract.ToolRef]contract.RemoteToolIdentity {
+	var bindings map[contract.ToolRef]contract.RemoteToolIdentity
+	for _, ref := range req.Tools {
+		if remote, ok := r.tools[ref].Tool.(*remotetool.Client); ok {
+			if bindings == nil {
+				bindings = make(map[contract.ToolRef]contract.RemoteToolIdentity)
+			}
+			bindings[ref] = remote.Identity()
+		}
+	}
+	return bindings
+}
+
+func (r *Runner) validateRemoteBindings(c checkpoint) error {
+	if !maps.Equal(c.RemoteBindings, r.remoteBindings(c.Request)) {
+		return contract.ErrRecoveryBinding
+	}
+	return nil
 }
 
 func (r *Runner) validateRecovery(subject contract.SubjectID, req contract.StartRequest) error {
@@ -247,7 +270,7 @@ func (r *Runner) startRecoverable(ctx context.Context, subject contract.SubjectI
 	}
 	c := checkpoint{
 		Format: 1, Identity: identity, BindingVersion: r.recovery.BindingVersion, Request: req, RequestDigest: digest,
-		WorkspaceVersion: workspace, Permissions: permissions, Deadline: s.deadline,
+		WorkspaceVersion: workspace, Permissions: permissions, Deadline: s.deadline, RemoteBindings: r.remoteBindings(req),
 		ReconcileTimeout: r.recovery.ReconcileTimeout, Budget: budget, Balance: budget, Step: 1, Messages: s.messages,
 	}
 	var shared *lease
@@ -356,6 +379,9 @@ func (r *Runner) Recover(ctx context.Context, subject contract.SubjectID, id con
 	if record.Result == nil && shared == nil {
 		if record.BindingVersion != r.recovery.BindingVersion {
 			return "", contract.ErrRecoveryBinding
+		}
+		if err := r.validateRemoteBindings(record); err != nil {
+			return "", err
 		}
 		if err := r.validateRecovery(subject, record.Request); err != nil {
 			return "", err
@@ -471,28 +497,23 @@ func (s *state) recordToolIntent(e mesh.EnvironmentRequest, req contract.ToolReq
 	}
 	d := &s.checkpoint.data
 	d.Intent = &toolIntent{Key: contract.ReceiptKey{
-		Runner: e.Run.Runner, Subject: e.Run.Subject, RunID: req.RunID, Step: s.step,
+		Runner: e.Run.Runner, Subject: e.Run.Subject, RunID: req.RunID, Step: s.step, Remote: d.RemoteBindings[req.Tool],
 		CallID: req.CallID, Tool: req.Tool, BindingVersion: d.BindingVersion, AdmissionEpoch: e.Run.Epoch,
-		Environment: e.Ref, Workspace: e.Run.Workspace, WorkspaceVersion: d.WorkspaceVersion, Fingerprint: toolFingerprint(req, e.Call.Path),
+		Environment: e.Ref, Workspace: e.Run.Workspace, WorkspaceVersion: d.WorkspaceVersion, Fingerprint: durable.ToolFingerprint(req, e.Call.Path),
 	}, Limits: req.Limits, Path: e.Call.Path}
 	d.Balance, d.ReconcileUntil = balance, time.Time{}
 	return s.saveLocked()
 }
 
-func toolFingerprint(req contract.ToolRequest, path string) string {
-	digest, _ := durable.Digest(struct {
-		Tool      contract.ToolRef
-		Arguments json.RawMessage
-		Path      string
-		Limits    contract.ToolLimits
-	}{req.Tool, req.Arguments, path, req.Limits})
-	return digest
-}
-
 func (r *Runner) resumePosition(s *state, a *activity, balance *limits) bool {
+	var verified contract.ToolRef
 	if intent := s.checkpoint.data.Intent; intent != nil {
-		if _, ok := r.reconcileTool(s, a, balance, *intent); !ok {
+		result, ok := r.reconcileTool(s, a, balance, *intent)
+		if !ok {
 			return false
+		}
+		if result.State == contract.ToolExecutionKnown {
+			verified = intent.Key.Tool
 		}
 	}
 	s.mu.Lock()
@@ -511,6 +532,9 @@ func (r *Runner) resumePosition(s *state, a *activity, balance *limits) bool {
 	}
 	s.mu.Unlock()
 
+	if !r.resumeRemoteWorkspaces(s, a, verified) {
+		return false
+	}
 	if a.env.Ref != "" && !r.awaitWorkspace(s, a) {
 		s.failModel(contract.Failed, contract.StopWorkspaceUnavailable, 0)
 		return false
@@ -546,7 +570,7 @@ func (r *Runner) reconcileTool(s *state, a *activity, balance *limits, intent to
 	e := a.env
 	e.Call = contract.CallScope{Run: e.Run, CallID: key.CallID, Tool: key.Tool, Limits: intent.Limits}
 	var result contract.ToolResult
-	var verified contract.ToolResult
+	var verified contract.ToolReceipt
 	until := s.reconciliationDeadline()
 	if s.reconcile(until, func(ctx context.Context) bool {
 		reply, err := mesh.CallReceipt(ctx, a.transport, mesh.QueryReceipt, e, req, key)
@@ -554,7 +578,7 @@ func (r *Runner) reconcileTool(s *state, a *activity, balance *limits, intent to
 			return false
 		}
 		value := reply.Receipt.Result
-		if !validToolResult(value, key.RunID, key.CallID) || toolStatus(value) == contract.ToolStatusUnknown {
+		if !contract.ValidToolResult(value, key.RunID, key.CallID) || toolStatus(value) == contract.ToolStatusUnknown {
 			return false
 		}
 		if value.Usage != nil {
@@ -575,35 +599,98 @@ func (r *Runner) reconcileTool(s *state, a *activity, balance *limits, intent to
 				}
 			}
 		}
-		verified = cloneToolResult(value)
+		verified = *reply.Receipt
+		verified.Result = cloneToolResult(value)
 		return true
-	}) {
-		result = verified
+	}, key.Remote != (contract.RemoteToolIdentity{})) {
+		result = verified.Result
 	}
 	scanned, raw := intent.Limits.MaxScanBytes, intent.Limits.MaxRawOutputBytes
 	if result.State == contract.ToolExecutionNotExecuted {
 		scanned, raw = 0, 0
 	}
 	// Recovery cannot re-read the original environment and artifact meters.
-	return result, s.settleTool(balance, req, result, toolStatus(result), true, scanned, true, raw)
+	if key.Remote != (contract.RemoteToolIdentity{}) {
+		s.recordRemoteCleanup(verified.Cleanup)
+	}
+	settled := s.settleTool(balance, req, result, toolStatus(result), true, scanned, true, raw)
+	if settled && key.Remote != (contract.RemoteToolIdentity{}) && result.State != contract.ToolExecutionNotExecuted {
+		return result, r.ensureRemoteWorkspace(s, a, key.Tool, key.Remote)
+	}
+	return result, settled
 }
 
 func (r *Runner) awaitWorkspace(s *state, a *activity) bool {
 	return s.reconcile(s.reconciliationDeadline(), func(ctx context.Context) bool {
 		version, err := r.workspaceVersion(ctx, a)
 		return err == nil && version == s.checkpoint.data.WorkspaceVersion
-	})
+	}, false)
+}
+
+func (s *state) recordRemoteCleanup(cleanup contract.CleanupStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cleanup != contract.CleanupReleased {
+		cleanup = contract.CleanupPending
+	}
+	if s.checkpoint.data.RemoteCleanup != contract.CleanupPending {
+		s.checkpoint.data.RemoteCleanup = cleanup
+	}
+}
+
+func (r *Runner) resumeRemoteWorkspaces(s *state, a *activity, verified contract.ToolRef) bool {
+	c := &s.checkpoint.data
+	if len(c.RemoteBindings) == 0 {
+		return true
+	}
+	needed := make(map[contract.ToolRef]bool)
+	for _, message := range s.messages {
+		if m := message.Tool; m != nil && m.Result.State == contract.ToolExecutionKnown {
+			needed[m.Tool] = true
+		}
+	}
+	for i, result := range c.ToolResults {
+		if result.State == contract.ToolExecutionKnown {
+			needed[c.Pending.ToolCalls[i].Tool] = true
+		}
+	}
+	for _, tool := range s.request.Tools {
+		if needed[tool] && tool != verified && !r.ensureRemoteWorkspace(s, a, tool, c.RemoteBindings[tool]) {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Runner) ensureRemoteWorkspace(s *state, a *activity, tool contract.ToolRef, remote contract.RemoteToolIdentity) bool {
+	if remote.Workspace == "" {
+		return true
+	}
+	key := contract.ReceiptKey{Remote: remote, Tool: tool, Subject: a.env.Run.Subject, Runner: a.env.Run.Runner,
+		RunID: a.env.Run.RunID, BindingVersion: s.checkpoint.data.BindingVersion}
+	if s.reconcile(s.reconciliationDeadline(), func(ctx context.Context) bool {
+		_, err := mesh.CallReceipt(ctx, a.transport, mesh.VerifyRemoteToolWorkspace, a.env, contract.ToolRequest{}, key)
+		return err == nil
+	}, true) {
+		return true
+	}
+	s.failModel(contract.Failed, contract.StopWorkspaceUnavailable, 0)
+	return false
 }
 
 // Only one query can be in flight even if a local provider disregards cancellation.
-func (s *state) reconcile(until time.Time, query func(context.Context) bool) bool {
+func (s *state) reconcile(until time.Time, query func(context.Context) bool, remote bool) bool {
 	if !time.Now().Before(until) || s.ctx.Err() != nil {
 		return false
 	}
 	window, cancel := context.WithDeadline(s.ctx, until)
 	defer cancel()
+	delay, queryTimeout := reconcileInterval, reconcileQueryTimeout
+	if remote {
+		queryTimeout = 250 * time.Millisecond
+	}
 	for window.Err() == nil {
-		ctx, cancelQuery := context.WithTimeout(window, reconcileQueryTimeout)
+		ctx, cancelQuery := context.WithTimeout(window, queryTimeout)
 		result := make(chan bool, 1)
 		go func() { result <- query(ctx) }()
 		select {
@@ -622,7 +709,10 @@ func (s *state) reconcile(until time.Time, query func(context.Context) bool) boo
 			case <-result:
 			}
 		}
-		timer := time.NewTimer(reconcileInterval)
+		timer := time.NewTimer(delay)
+		if remote {
+			delay = min(delay*2, 100*time.Millisecond)
+		}
 		select {
 		case <-window.Done():
 			timer.Stop()

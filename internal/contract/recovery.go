@@ -47,7 +47,22 @@ type RetainedArtifactStore interface {
 	RetainsAcrossRestart() bool
 }
 
+// RemoteToolIdentity pins a logical provider, its journal and an optional retained workspace.
+type RemoteToolIdentity struct {
+	Provider         string
+	Journal          string
+	Version          string
+	Workspace        WorkspaceRef
+	WorkspaceVersion string
+}
+
+type RemoteOwner struct {
+	Instance string
+	Epoch    uint64
+}
+
 type ReceiptKey struct {
+	Remote           RemoteToolIdentity `json:",omitzero"`
 	Runner           RunnerRef
 	Subject          SubjectID
 	RunID            RunID
@@ -63,8 +78,9 @@ type ReceiptKey struct {
 }
 
 type ToolReceipt struct {
-	Key    ReceiptKey
-	Result ToolResult
+	Key     ReceiptKey
+	Result  ToolResult
+	Cleanup CleanupStatus `json:",omitempty"`
 }
 
 // ReceiptProvider queries the durable original invocation without starting work.

@@ -267,7 +267,7 @@ func validHistory(history []contract.Message) bool {
 				}
 				paired := history[i]
 				if paired.Tool == nil || paired.User != nil || paired.Assistant != nil || paired.Tool.Tool != call.Tool ||
-					paired.Tool.Result.CallID != call.CallID || !validToolResult(paired.Tool.Result, paired.Tool.Result.RunID, call.CallID) ||
+					paired.Tool.Result.CallID != call.CallID || !contract.ValidToolResult(paired.Tool.Result, paired.Tool.Result.RunID, call.CallID) ||
 					paired.Tool.Result.State == contract.ToolExecutionUnknown {
 					return false
 				}

@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -137,6 +138,10 @@ func (r *Runner) generate(s *state, subject contract.SubjectID) {
 		s.addUsageLocked(reply.Usage)
 		assistant := &contract.AssistantMessage{Text: reply.Text, ToolCalls: cloneCalls(reply.ToolCalls)}
 		if d := s.checkpoint; d != nil {
+			for i := range assistant.ToolCalls {
+				// Raw arguments use the same canonical form as the durable checkpoint.
+				assistant.ToolCalls[i].Arguments, _ = json.Marshal(assistant.ToolCalls[i].Arguments)
+			}
 			d.data.ModelInFlight, d.data.ModelAdmitted, d.data.Balance = false, false, balance
 			if reply.Finish == contract.ModelFinishToolCalls {
 				d.data.Pending = assistant

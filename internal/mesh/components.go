@@ -8,6 +8,7 @@ import (
 	"maps"
 
 	"github.com/shubolab/superagent/internal/contract"
+	"github.com/shubolab/superagent/internal/remotetool"
 )
 
 func (l *Local) SetComponents(tools map[contract.ToolRef]contract.LocalToolBinding, environments map[contract.EnvironmentRef]contract.EnvironmentProvider) error {
@@ -71,6 +72,21 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 	if req.Operation == VerifyRetainedArtifact {
 		return l.readArtifact(ctx, e.Run.Subject, MeshRequest{Runner: e.Run.Runner, RunID: e.Run.RunID, Artifact: req.Artifact})
 	}
+	if req.Operation == VerifyRemoteToolWorkspace {
+		key := req.ReceiptKey
+		if key.CallID != "" || key.Subject != e.Run.Subject || key.Runner != e.Run.Runner || key.RunID != e.Run.RunID {
+			return MeshReply{}, contract.ErrAccessDenied
+		}
+		remote, ok := l.tools[key.Tool].Tool.(*remotetool.Client)
+		if !ok || key.Remote != remote.Identity() {
+			return MeshReply{}, contract.ErrRecoveryBinding
+		}
+		owner, err := remoteOwner(ctx, e.Run)
+		if err != nil {
+			return MeshReply{}, err
+		}
+		return MeshReply{}, remote.VerifyWorkspace(ctx, key, e.Run, owner)
+	}
 	if req.Operation == QueryReceipt {
 		key := req.ReceiptKey
 		if !validReceiptRoute(key, e) || key.Tool != e.Call.Tool || key.CallID != e.Call.CallID {
@@ -78,6 +94,17 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		}
 		if err := admitComponent(ctx, req); err != nil {
 			return MeshReply{}, err
+		}
+		if remote, ok := l.tools[key.Tool].Tool.(*remotetool.Client); ok {
+			owner, err := remoteOwner(ctx, e.Run)
+			if err != nil {
+				return MeshReply{}, err
+			}
+			receipt, err := remote.QueryRemote(ctx, key, e.Run, owner, req.Tool.Limits)
+			return MeshReply{Receipt: receipt}, err
+		}
+		if key.Remote != (contract.RemoteToolIdentity{}) {
+			return MeshReply{}, contract.ErrRecoveryBinding
 		}
 		provider, ok := l.tools[key.Tool].Tool.(contract.ReceiptProvider)
 		if !ok {
@@ -99,6 +126,28 @@ func (l *Local) componentCall(ctx context.Context, req MeshRequest) (MeshReply, 
 		}
 		if err := admitComponent(ctx, req); err != nil {
 			return MeshReply{}, errors.Join(contract.ErrNotDelivered, err)
+		}
+		if remote, ok := binding.Tool.(*remotetool.Client); ok {
+			key := req.ReceiptKey
+			if !validReceiptRoute(key, e) || key.Remote != remote.Identity() ||
+				key.Tool != req.Tool.Tool || key.CallID != req.Tool.CallID {
+				return MeshReply{}, errors.Join(contract.ErrNotDelivered, contract.ErrAccessDenied)
+			}
+			owner, err := remoteOwner(ctx, e.Run)
+			if err != nil {
+				return MeshReply{}, errors.Join(contract.ErrNotDelivered, err)
+			}
+			receipt, err := remote.InvokeRemote(ctx, key, e.Run, owner, req.Tool)
+			if errors.Is(err, remotetool.ErrResponseLost) {
+				return MeshReply{}, errors.Join(ErrResponseLost, err)
+			}
+			if err != nil {
+				return MeshReply{}, err
+			}
+			return MeshReply{Tool: receipt.Result, Cleanup: receipt.Cleanup}, nil
+		}
+		if req.ReceiptKey.Remote != (contract.RemoteToolIdentity{}) {
+			return MeshReply{}, errors.Join(contract.ErrNotDelivered, contract.ErrRecoveryBinding)
 		}
 		toolCtx := contract.WithFileOpener(ctx, func(openCtx context.Context, claimed contract.ToolRequest, path string) (io.ReadCloser, error) {
 			if err := ctx.Err(); err != nil {
@@ -232,4 +281,15 @@ func validReceiptRoute(key contract.ReceiptKey, e EnvironmentRequest) bool {
 	return key.Runner == e.Run.Runner && key.Subject == e.Run.Subject && key.RunID == e.Run.RunID &&
 		key.Step != 0 && (key.AdmissionEpoch == 0) == (e.Run.Epoch == 0) && key.Environment == e.Ref && key.Workspace == e.Run.Workspace &&
 		key.BindingVersion != "" && key.Fingerprint != ""
+}
+
+func remoteOwner(ctx context.Context, scope contract.RunScope) (contract.RemoteOwner, error) {
+	if scope.Epoch == 0 {
+		return contract.RemoteOwner{}, nil
+	}
+	guard := takeoverGuard(ctx)
+	if guard == nil || !guard.Matches(scope) {
+		return contract.RemoteOwner{}, contract.ErrAccessDenied
+	}
+	return guard.RemoteOwner(), nil
 }

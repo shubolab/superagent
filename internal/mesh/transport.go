@@ -47,6 +47,7 @@ const (
 	QueryReceipt
 	VerifyRecoveryWorkspace
 	VerifyRetainedArtifact
+	VerifyRemoteToolWorkspace
 )
 
 type MeshRequest struct {
@@ -77,6 +78,7 @@ type MeshReply struct {
 	ReadCapabilities *contract.EnvironmentReadCapabilities
 	RawOutputBytes   uint64
 	Receipt          *contract.ToolReceipt
+	Cleanup          contract.CleanupStatus
 	WorkspaceVersion string
 	ArtifactPage     contract.ArtifactPage
 }
