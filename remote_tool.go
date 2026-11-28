@@ -1,6 +1,7 @@
 package superagent
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/shubolab/superagent/internal/contract"
@@ -31,3 +32,11 @@ func NewRemoteToolHandler(cfg RemoteToolServerConfig) (http.Handler, error) {
 func NewSharedRemoteToolAuthority(directory string) (RemoteToolAuthority, error) {
 	return run.NewRemoteAuthority(directory)
 }
+
+// PrepareEvidenceAppend validates the arguments for an opt-in append-file/v1 Mesh binding.
+func PrepareEvidenceAppend(args json.RawMessage) (string, error) {
+	path, _, err := contract.ParseEvidenceAppend(args)
+	return path, err
+}
+
+const AppendFileEvidenceV1 = contract.AppendFileEvidenceV1

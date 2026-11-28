@@ -285,7 +285,7 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 	}
 	reject := func(code string) (contract.ToolResult, bool) {
 		result := skippedTool(req, code)
-		return result, s.settleTool(balance, req, result, contract.ToolStatusRejected, false, 0, true, 0)
+		return result, s.settleTool(balance, req, result, contract.ToolStatusRejected, false, 0, true, 0, nil)
 	}
 	if !allowed {
 		return reject("tool_not_authorized")
@@ -415,12 +415,12 @@ func (r *Runner) callTool(s *state, a *activity, balance *limits, call contract.
 		result.Usage.ScannedBytes = &measured
 	}
 	if key != (contract.ReceiptKey{}) && (!contract.ValidToolResult(result, req.RunID, req.CallID) || toolStatus(result) == contract.ToolStatusUnknown) {
-		return r.reconcileTool(s, a, balance, toolIntent{Key: key, Limits: req.Limits})
+		return r.reconcileTool(s, a, balance, toolIntent{Key: key, Limits: req.Limits, Path: e.Call.Path})
 	}
 	if key.Remote != (contract.RemoteToolIdentity{}) {
 		s.recordRemoteCleanup(remoteCleanup)
 	}
-	ok := s.settleTool(balance, req, result, toolStatus(result), true, measured, verified, raw)
+	ok := s.settleTool(balance, req, result, toolStatus(result), true, measured, verified, raw, nil)
 	if ok && key.Remote != (contract.RemoteToolIdentity{}) && result.State != contract.ToolExecutionNotExecuted {
 		ok = r.ensureRemoteWorkspace(s, a, key.Tool, key.Remote)
 	}
@@ -509,7 +509,7 @@ func (a *activity) cleanupCall(op mesh.Operation, e mesh.EnvironmentRequest, key
 }
 
 func (s *state) settleTool(balance *limits, req contract.ToolRequest, result contract.ToolResult, status contract.ToolStatus,
-	dispatched bool, measured uint64, verified bool, raw uint64) bool {
+	dispatched bool, measured uint64, verified bool, raw uint64, evidence *contract.WriteEvidenceRef) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	live := s.runningLocked()
@@ -568,6 +568,12 @@ func (s *state) settleTool(balance *limits, req contract.ToolRequest, result con
 	balance.Output -= size
 	if d := s.checkpoint; d != nil {
 		d.data.ToolResults = append(d.data.ToolResults, cloneToolResult(result))
+		if evidence != nil {
+			if d.data.WriteEvidence == nil {
+				d.data.WriteEvidence = make(map[contract.CallID]contract.WriteEvidenceRef)
+			}
+			d.data.WriteEvidence[req.CallID] = *evidence
+		}
 		d.data.Intent, d.data.Balance = nil, *balance
 		if !s.saveLocked() {
 			return false

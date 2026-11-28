@@ -12,3 +12,5 @@ const Supported = false
 func Lock(string) (*os.File, error) {
 	return nil, errors.New("local recovery locking is unavailable")
 }
+
+func ReadLock(path string) (*os.File, error) { return Lock(path) }

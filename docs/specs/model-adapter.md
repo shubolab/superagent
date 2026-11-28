@@ -130,4 +130,4 @@ type ModelToolCall struct {
 | 收到 `ModelCompleted` 后、第一次工具派发前取消生效 | 待派发工具执行次数为零。Run 返回取消终态 |
 
 
-真实供应商冒烟使用 `TestAnthropicLiveSearch`。宿主提供 `ANTHROPIC_API_KEY` 和 `SUPERAGENT_ANTHROPIC_MODEL`，并设置 `SUPERAGENT_ANTHROPIC_LIVE=1` 后运行 `go test -run '^TestAnthropicLiveSearch$' -v`。普通测试用本地 HTTP 服务器覆盖协议和两个模型回合。
+真实供应商冒烟使用 `TestAnthropicLiveSearch`。宿主提供 `ANTHROPIC_API_KEY` 和 `SUPERAGENT_ANTHROPIC_MODEL`，并设置 `SUPERAGENT_ANTHROPIC_LIVE=1` 后运行 `go test ./tests/sdk -count=1 -run '^TestAnthropicLiveSearch$' -v`。普通测试用本地 HTTP 服务器覆盖协议和两个模型回合。

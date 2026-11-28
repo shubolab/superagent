@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shubolab/superagent/internal/contract"
 	"github.com/shubolab/superagent/internal/durable"
 )
 
@@ -142,7 +143,7 @@ func TestRemoteToolServiceProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewRemoteToolHandler(RemoteToolServerConfig{
+	serverConfig := RemoteToolServerConfig{
 		Identity: identity, ToolRef: "write", Environment: env, Authority: authority,
 		ReceiptDirectory: filepath.Join(root, "receipts"),
 		Authorize: func(_ context.Context, peer *x509.Certificate, key ReceiptKey) RemoteToolAccess {
@@ -182,7 +183,20 @@ func TestRemoteToolServiceProcess(t *testing.T) {
 					Completion: &ToolCompletion{Outcome: ToolSucceeded, Content: "saved"}}, nil
 			}),
 		},
-	})
+	}
+	if strings.HasPrefix(scenario, "evidence-") {
+		environment, identity := remoteEvidenceWorkspace(t, root)
+		serverConfig.Identity = identity
+		serverConfig.Environment = &evidenceProcessWorkspace{
+			EnvironmentProvider: environment, EvidenceWorkspace: environment.(contract.EvidenceWorkspace),
+			root: root, scenario: scenario, log: log,
+		}
+		serverConfig.EvidenceRetention = time.Minute
+		serverConfig.Binding = LocalToolBinding{Spec: ToolSpec{
+			NeedsWorkspaceWrite: true, Limits: ToolLimits{MaxResultBytes: 1024, MaxScanBytes: 8},
+		}}
+	}
+	handler, err := NewRemoteToolHandler(serverConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,6 +418,10 @@ func remoteRunClient(t *testing.T, root, endpoint string, identity RemoteToolIde
 	if takeover {
 		recovery.Takeover = &TakeoverConfig{LeaseDuration: time.Second}
 	}
+	prepare := prepareRemoteAppend
+	if identity.EvidenceRule != "" {
+		prepare = PrepareEvidenceAppend
+	}
 	mesh, err := NewMesh(MeshConfig{
 		LocalRunners: map[RunnerRef]RunnerConfig{"runner": {
 			AllowedModels: map[SubjectID][]ModelRef{"owner": {"model"}},
@@ -414,7 +432,7 @@ func remoteRunClient(t *testing.T, root, endpoint string, identity RemoteToolIde
 		}},
 		LocalModels: map[ModelRef]ModelProvider{"model": model},
 		LocalTools: map[ToolRef]LocalToolBinding{"write": {
-			Tool: tool, Prepare: prepareRemoteAppend,
+			Tool: tool, Prepare: prepare,
 			Spec: ToolSpec{InputSchema: json.RawMessage(`{"type":"object"}`), Limits: ToolLimits{MaxResultBytes: 1024, MaxScanBytes: 8}},
 		}},
 		ResolveCaller: func(context.Context) (SubjectID, error) { return "owner", nil },
@@ -696,13 +714,17 @@ func TestRemoteToolRunnerProcess(t *testing.T) {
 	}
 	role := os.Getenv("SUPERAGENT_REMOTE_RUNNER_TEST_ROLE")
 	scenario := os.Getenv("SUPERAGENT_REMOTE_RUNNER_TEST_SCENARIO")
-	takeover := scenario == "ownership"
+	takeover := scenario == "ownership" || scenario == "evidence-fenced-stage"
 	f := defaultRecoveryFixture(root)
 	var model ModelProvider = f
 	if role == "original" && scenario == "committed" {
 		model = remotePauseModel{f}
 	}
 	_, identity := remoteWorkspace(t, root)
+	if scenario == "evidence-fenced-stage" {
+		_, identity = remoteEvidenceWorkspace(t, root)
+		model = writeEvidenceModel{f}
+	}
 	client := remoteRunClient(t, root, os.Getenv("SUPERAGENT_REMOTE_RUNNER_TEST_ENDPOINT"), identity, model, 3800*time.Millisecond, takeover)
 	ctx, cancel := context.WithTimeout(t.Context(), 9*time.Second)
 	defer cancel()

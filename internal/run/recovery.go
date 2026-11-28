@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -37,6 +38,7 @@ type checkpoint struct {
 	Permissions      map[contract.ToolRef]contract.ToolPermission
 	WorkspaceVersion string
 	RemoteBindings   map[contract.ToolRef]contract.RemoteToolIdentity `json:",omitempty"`
+	WriteEvidence    map[contract.CallID]contract.WriteEvidenceRef    `json:",omitempty"`
 	RemoteCleanup    contract.CleanupStatus                           `json:",omitempty"`
 	Deadline         time.Time
 	ReconcileTimeout time.Duration
@@ -581,6 +583,17 @@ func (r *Runner) reconcileTool(s *state, a *activity, balance *limits, intent to
 		if !contract.ValidToolResult(value, key.RunID, key.CallID) || toolStatus(value) == contract.ToolStatusUnknown {
 			return false
 		}
+		if ref := reply.Receipt.Evidence; ref != nil {
+			if key.Remote.EvidenceRule != contract.AppendFileEvidenceV1 || ref.ID != durable.WriteEvidenceID(key) ||
+				!contract.ValidContentHash(ref.Version) || toolStatus(value) != contract.ToolStatusSucceeded {
+				return false
+			}
+			var file contract.AppendFileResult
+			if json.Unmarshal([]byte(value.Completion.Content), &file) != nil || file.Path != intent.Path ||
+				file.Version != ref.Version || file.SHA256 != ref.Version || file.Bytes == 0 {
+				return false
+			}
+		}
 		if value.Usage != nil {
 			scanned, raw := valueOr(value.Usage.ScannedBytes, 0), valueOr(value.Usage.RawOutputBytes, 0)
 			if scanned > intent.Limits.MaxScanBytes || raw > intent.Limits.MaxRawOutputBytes ||
@@ -613,7 +626,7 @@ func (r *Runner) reconcileTool(s *state, a *activity, balance *limits, intent to
 	if key.Remote != (contract.RemoteToolIdentity{}) {
 		s.recordRemoteCleanup(verified.Cleanup)
 	}
-	settled := s.settleTool(balance, req, result, toolStatus(result), true, scanned, true, raw)
+	settled := s.settleTool(balance, req, result, toolStatus(result), true, scanned, true, raw, verified.Evidence)
 	if settled && key.Remote != (contract.RemoteToolIdentity{}) && result.State != contract.ToolExecutionNotExecuted {
 		return result, r.ensureRemoteWorkspace(s, a, key.Tool, key.Remote)
 	}

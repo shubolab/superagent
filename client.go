@@ -3,71 +3,9 @@ package superagent
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
-
-	"github.com/shubolab/superagent/internal/contract"
 
 	"github.com/shubolab/superagent/internal/mesh"
-	"github.com/shubolab/superagent/internal/run"
 )
-
-type MeshConfig struct {
-	LocalRunners      map[RunnerRef]RunnerConfig
-	LocalModels       map[ModelRef]ModelProvider
-	LocalTools        map[ToolRef]LocalToolBinding
-	LocalEnvironments map[EnvironmentRef]EnvironmentProvider
-	ResolveCaller     func(context.Context) (SubjectID, error)
-	LocalArtifacts    ArtifactStore
-}
-
-type Mesh struct {
-	local *mesh.Local
-}
-
-// NewMesh validates and fixes the component bindings for this assembly.
-func NewMesh(cfg MeshConfig) (*Mesh, error) {
-	models := make(map[ModelRef]struct{}, len(cfg.LocalModels))
-	for ref := range cfg.LocalModels {
-		models[ref] = struct{}{}
-	}
-	var local *mesh.Local
-	openModel := func(ctx context.Context, subject SubjectID, req ModelRequest) (ModelStream, error) {
-		return mesh.OpenModel(ctx, local, subject, req)
-	}
-	runners := make(map[RunnerRef]mesh.RunnerEndpoint, len(cfg.LocalRunners))
-	for ref, config := range cfg.LocalRunners {
-		runner, err := run.New(config, models, openModel)
-		if err != nil {
-			return nil, fmt.Errorf("runner %q: %w", ref, err)
-		}
-		runners[ref] = runner
-	}
-	var err error
-	local, err = mesh.NewLocal(runners, cfg.LocalModels, cfg.ResolveCaller)
-	if err != nil {
-		return nil, err
-	}
-	if err := local.SetComponents(cfg.LocalTools, cfg.LocalEnvironments); err != nil {
-		return nil, err
-	}
-	if err := local.SetArtifactStore(cfg.LocalArtifacts); err != nil {
-		return nil, err
-	}
-	for ref, config := range cfg.LocalRunners {
-		runner := runners[ref].(*run.Runner)
-		if retained, ok := cfg.LocalArtifacts.(contract.RetainedArtifactStore); ok {
-			runner.SetRetainedArtifacts(retained.RetainsAcrossRestart())
-		}
-		if staging, ok := cfg.LocalArtifacts.(contract.TakeoverArtifactStore); ok {
-			runner.SetTakeoverArtifacts(staging.StagesUntilPublication())
-		}
-		if err := runner.ConfigureTools(ref, local, config, cfg.LocalTools, cfg.LocalEnvironments, cfg.LocalArtifacts != nil); err != nil {
-			return nil, fmt.Errorf("runner %q: %w", ref, err)
-		}
-	}
-	return &Mesh{local: local}, nil
-}
 
 type Client struct {
 	transport mesh.MeshTransport
@@ -136,9 +74,4 @@ func (r *Run) Cancel(ctx context.Context) error {
 
 func (r *Run) request(operation mesh.Operation) mesh.MeshRequest {
 	return mesh.MeshRequest{Operation: operation, Runner: r.client.runner, RunID: r.id}
-}
-
-// OpenToolFile uses the workspace permission carried with an admitted tool invocation.
-func OpenToolFile(ctx context.Context, req ToolRequest, path string) (io.ReadCloser, error) {
-	return contract.OpenToolFile(ctx, req, path)
 }

@@ -54,6 +54,7 @@ type RemoteToolIdentity struct {
 	Version          string
 	Workspace        WorkspaceRef
 	WorkspaceVersion string
+	EvidenceRule     string `json:",omitempty"`
 }
 
 type RemoteOwner struct {
@@ -78,9 +79,10 @@ type ReceiptKey struct {
 }
 
 type ToolReceipt struct {
-	Key     ReceiptKey
-	Result  ToolResult
-	Cleanup CleanupStatus `json:",omitempty"`
+	Key      ReceiptKey
+	Result   ToolResult
+	Cleanup  CleanupStatus     `json:",omitempty"`
+	Evidence *WriteEvidenceRef `json:",omitempty"`
 }
 
 // ReceiptProvider queries the durable original invocation without starting work.

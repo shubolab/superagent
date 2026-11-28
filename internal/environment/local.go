@@ -218,6 +218,10 @@ func (l *Local) OpenRead(ctx context.Context, scope contract.CallScope, ref cont
 		_ = f.Close()
 		return nil, contract.ErrAccessDenied
 	}
+	return startRead(ctx, scope, g, f), nil
+}
+
+func startRead(ctx context.Context, scope contract.CallScope, g *grant, f *os.File) *readHandle {
 	readCtx, cancel := context.WithDeadline(ctx, scope.Run.Deadline)
 	r := &readHandle{
 		f: f, ctx: readCtx, cancel: cancel, limit: scope.Limits.MaxScanBytes,
@@ -225,7 +229,7 @@ func (l *Local) OpenRead(ctx context.Context, scope contract.CallScope, ref cont
 	}
 	r.stop = context.AfterFunc(readCtx, func() { _ = r.closeFile() })
 	g.reader = r
-	return r, nil
+	return r
 }
 
 func (l *Local) Revoke(ctx context.Context, scope contract.CallScope, ref contract.EnvironmentGrantRef) (uint64, error) {

@@ -18,6 +18,7 @@ type ReceiptTool struct {
 
 type receiptRecord struct {
 	Key     contract.ReceiptKey
+	Write   *contract.WriteIntent `json:",omitempty"`
 	Result  *contract.ToolResult
 	Cleanup contract.CleanupStatus `json:",omitempty"`
 }
@@ -48,6 +49,17 @@ func (t *ReceiptTool) Invoke(ctx context.Context, req contract.ToolRequest) (con
 
 // InvokeReceipt executes and records one result before returning it to the transport.
 func (t *ReceiptTool) InvokeReceipt(ctx context.Context, key contract.ReceiptKey, req contract.ToolRequest) (contract.ToolReceipt, error) {
+	return t.invokeReceipt(ctx, key, req, nil)
+}
+
+func (t *ReceiptTool) InvokeWriteReceipt(ctx context.Context, key contract.ReceiptKey, req contract.ToolRequest, intent contract.WriteIntent) (contract.ToolReceipt, error) {
+	if intent.Key != key || intent.Limits != req.Limits {
+		return contract.ToolReceipt{}, contract.ErrInvalidRequest
+	}
+	return t.invokeReceipt(ctx, key, req, &intent)
+}
+
+func (t *ReceiptTool) invokeReceipt(ctx context.Context, key contract.ReceiptKey, req contract.ToolRequest, intent *contract.WriteIntent) (contract.ToolReceipt, error) {
 	empty := contract.ToolReceipt{}
 	if key.RunID != req.RunID || key.CallID != req.CallID || key.Tool != req.Tool {
 		return empty, contract.ErrAccessDenied
@@ -75,7 +87,7 @@ func (t *ReceiptTool) InvokeReceipt(ctx context.Context, key contract.ReceiptKey
 	if err := ctx.Err(); err != nil {
 		return empty, err
 	}
-	record.Key = key
+	record.Key, record.Write = key, intent
 	if _, err := Write(path, record); err != nil {
 		return empty, err
 	}
@@ -109,23 +121,32 @@ func (t *ReceiptTool) InvokeReceipt(ctx context.Context, key contract.ReceiptKey
 }
 
 func (t *ReceiptTool) QueryReceipt(ctx context.Context, key contract.ReceiptKey) (*contract.ToolReceipt, error) {
+	result, _, err := t.LookupReceipt(ctx, key)
+	return result, err
+}
+
+// LookupReceipt exposes the matching durable write admission only while its receipt is pending.
+func (t *ReceiptTool) LookupReceipt(ctx context.Context, key contract.ReceiptKey) (*contract.ToolReceipt, *contract.WriteIntent, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var record receiptRecord
 	if err := Read(t.path(key), &record); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	if record.Key != key {
-		return nil, contract.ErrAccessDenied
+		return nil, nil, contract.ErrAccessDenied
 	}
 	if record.Result == nil {
-		return nil, nil
+		if record.Write != nil && record.Write.Key != key {
+			return nil, nil, contract.ErrAccessDenied
+		}
+		return nil, record.Write, nil
 	}
-	return &contract.ToolReceipt{Key: record.Key, Result: *record.Result, Cleanup: record.Cleanup}, nil
+	return &contract.ToolReceipt{Key: record.Key, Result: *record.Result, Cleanup: record.Cleanup}, nil, nil
 }
 
 func ToolFingerprint(req contract.ToolRequest, path string) string {
@@ -136,4 +157,9 @@ func ToolFingerprint(req contract.ToolRequest, path string) string {
 		Limits    contract.ToolLimits
 	}{req.Tool, req.Arguments, path, req.Limits})
 	return digest
+}
+
+func WriteEvidenceID(key contract.ReceiptKey) string {
+	id, _ := Digest([4]string{string(key.Runner), string(key.Subject), string(key.RunID), string(key.CallID)})
+	return id
 }

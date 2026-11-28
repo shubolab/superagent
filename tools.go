@@ -1,6 +1,10 @@
 package superagent
 
 import (
+	"context"
+	"io"
+
+	"github.com/shubolab/superagent/internal/contract"
 	"github.com/shubolab/superagent/internal/environment"
 	"github.com/shubolab/superagent/internal/search"
 )
@@ -25,4 +29,9 @@ type SearchMatch = search.Match
 // NewBoundedFileSearch returns the built-in read-only single-file literal search tool.
 func NewBoundedFileSearch() LocalToolBinding {
 	return search.New()
+}
+
+// OpenToolFile uses the workspace permission carried with an admitted tool invocation.
+func OpenToolFile(ctx context.Context, req ToolRequest, path string) (io.ReadCloser, error) {
+	return contract.OpenToolFile(ctx, req, path)
 }

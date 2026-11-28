@@ -290,6 +290,8 @@ func TestAnthropicLiveCompactionComparison(t *testing.T) {
 	if os.Getenv("SUPERAGENT_ANTHROPIC_EVAL") != "1" {
 		t.Skip("explicit opt-in required for paid supplier requests")
 	}
+	// Keep existing relative profile and meter paths rooted at the repository.
+	t.Chdir("../..")
 	path, key := os.Getenv("SUPERAGENT_ANTHROPIC_EVAL_PROFILE"), os.Getenv("ANTHROPIC_API_KEY")
 	if path == "" || key == "" {
 		t.Fatal("configure SUPERAGENT_ANTHROPIC_EVAL_PROFILE and ANTHROPIC_API_KEY")

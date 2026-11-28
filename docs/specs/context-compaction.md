@@ -63,7 +63,7 @@ L = min(单次模型输入字节上限, Run 剩余输入字节)
 
 ### 长任务对照入口
 
-`go test -run '^TestContextCompactionComparisonLocal$' -v` 用确定性模型检查两组任务和三种策略。每条 JSON 结果记录成功、原文保留、扫描和重放次数、窗口错误、含摘要的用量和耗时。
+`go test ./tests/sdk -count=1 -run '^TestContextCompactionComparisonLocal$' -v` 用确定性模型检查两组任务和三种策略。每条 JSON 结果记录成功、原文保留、扫描和重放次数、窗口错误、含摘要的用量和耗时。
 
 真实评估使用 `TestAnthropicLiveCompactionComparison`。设置 `SUPERAGENT_ANTHROPIC_EVAL=1`、`ANTHROPIC_API_KEY` 与 `SUPERAGENT_ANTHROPIC_EVAL_PROFILE`，最后一项指向本地 JSON 配置。
 
@@ -75,4 +75,4 @@ L = min(单次模型输入字节上限, Run 剩余输入字节)
 | `MeterCommand` | 已校准的本地计量命令及参数。标准输入是待发请求字节，标准输出是 token 数 |
 | `InputUSDPerMillion`、`OutputUSDPerMillion` | 对照用输入与输出单价，成本按实际用量估算 |
 
-运行 `go test -run '^TestAnthropicLiveCompactionComparison$' -v` 获取结果。先完成 [供应商冒烟](model-adapter.md#验收场景)。真实评估一并检查实测低估量、安全余量和实际压缩选择。
+运行 `go test ./tests/sdk -count=1 -run '^TestAnthropicLiveCompactionComparison$' -v` 获取结果。先完成 [供应商冒烟](model-adapter.md#验收场景)。真实评估一并检查实测低估量、安全余量和实际压缩选择。

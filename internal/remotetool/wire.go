@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/shubolab/superagent/internal/contract"
+	"github.com/shubolab/superagent/internal/durable"
 )
 
 const (
@@ -51,7 +52,8 @@ func validIdentity(id contract.RemoteToolIdentity) bool {
 	return id.Provider != "" && id.Journal != "" && id.Version != "" &&
 		len(id.Provider) <= 128 && len(id.Journal) <= 128 && len(id.Version) <= 128 &&
 		len(id.Workspace) <= 128 && len(id.WorkspaceVersion) <= 128 &&
-		(id.Workspace == "") == (id.WorkspaceVersion == "")
+		(id.Workspace == "") == (id.WorkspaceVersion == "") &&
+		(id.EvidenceRule == "" || (id.EvidenceRule == contract.AppendFileEvidenceV1 && id.Workspace != ""))
 }
 
 func validReceipt(receipt *contract.ToolReceipt, key contract.ReceiptKey, limit uint64) bool {
@@ -67,6 +69,18 @@ func validReceipt(receipt *contract.ToolReceipt, key contract.ReceiptKey, limit 
 	}
 	if result.Completion != nil && (len(result.Completion.Artifacts) != 0 || uint64(len(result.Completion.Content)) > min(maxReceiptBytes, limit)) {
 		return false
+	}
+	if ref := receipt.Evidence; ref != nil {
+		if key.Remote.EvidenceRule != contract.AppendFileEvidenceV1 ||
+			result.State != contract.ToolExecutionKnown || result.Completion.Outcome != contract.ToolSucceeded ||
+			ref.ID != durable.WriteEvidenceID(key) || !contract.ValidContentHash(ref.Version) {
+			return false
+		}
+		var output contract.AppendFileResult
+		if json.Unmarshal([]byte(result.Completion.Content), &output) != nil || !contract.ValidManagedPath(output.Path) ||
+			output.Version != ref.Version || output.SHA256 != ref.Version || output.Bytes == 0 {
+			return false
+		}
 	}
 	encoded, err := json.Marshal(result)
 	return err == nil && uint64(len(encoded)) <= min(maxReceiptBytes, limit)

@@ -26,13 +26,14 @@ type Authority interface {
 }
 
 type ServerConfig struct {
-	Identity         contract.RemoteToolIdentity
-	ToolRef          contract.ToolRef
-	Binding          contract.LocalToolBinding
-	Environment      contract.EnvironmentProvider
-	ReceiptDirectory string
-	Authorize        func(context.Context, *x509.Certificate, contract.ReceiptKey) Access
-	Authority        Authority
+	Identity          contract.RemoteToolIdentity
+	ToolRef           contract.ToolRef
+	Binding           contract.LocalToolBinding
+	Environment       contract.EnvironmentProvider
+	ReceiptDirectory  string
+	Authorize         func(context.Context, *x509.Certificate, contract.ReceiptKey) Access
+	Authority         Authority
+	EvidenceRetention time.Duration
 }
 
 type server struct {
@@ -42,7 +43,8 @@ type server struct {
 
 func NewHandler(cfg ServerConfig) (http.Handler, error) {
 	spec := cfg.Binding.Spec
-	if !validIdentity(cfg.Identity) || cfg.ToolRef == "" || cfg.Binding.Tool == nil || cfg.Authorize == nil ||
+	usesEvidence := cfg.Identity.EvidenceRule != ""
+	if !validIdentity(cfg.Identity) || cfg.ToolRef == "" || (cfg.Binding.Tool == nil && !usesEvidence) || cfg.Authorize == nil ||
 		spec.NeedsArtifactOutput || spec.NeedsContextSource || spec.Limits.MaxResultBytes == 0 || spec.Limits.MaxResultBytes > maxReceiptBytes {
 		return nil, contract.ErrInvalidConfiguration
 	}
@@ -51,8 +53,14 @@ func NewHandler(cfg ServerConfig) (http.Handler, error) {
 			return nil, contract.ErrInvalidConfiguration
 		}
 	}
+	if usesEvidence {
+		if _, ok := cfg.Environment.(contract.EvidenceWorkspace); !ok || !spec.NeedsWorkspaceWrite ||
+			spec.NeedsReadAccess || cfg.Binding.Tool != nil || cfg.EvidenceRetention <= 0 || cfg.Binding.Prepare != nil {
+			return nil, contract.ErrInvalidConfiguration
+		}
+	}
 	if spec.NeedsReadAccess || spec.NeedsWorkspaceWrite {
-		if cfg.Identity.Workspace == "" || cfg.Binding.Prepare == nil || spec.Limits.MaxScanBytes == 0 {
+		if cfg.Identity.Workspace == "" || (cfg.Binding.Prepare == nil && !usesEvidence) || spec.Limits.MaxScanBytes == 0 {
 			return nil, contract.ErrInvalidConfiguration
 		}
 		if spec.NeedsWorkspaceWrite {
@@ -118,7 +126,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if msg.Workspace {
 			reply.Ready = s.verifyWorkspace(ctx, msg.Scope) == nil
 		} else {
-			receipt, err := s.journal.QueryReceipt(ctx, msg.Key)
+			receipt, err := s.queryReceipt(ctx, msg)
 			if err != nil || (receipt != nil && !validReceipt(receipt, msg.Key, msg.Limits.MaxResultBytes)) {
 				http.Error(w, "receipt unavailable", http.StatusServiceUnavailable)
 				return
@@ -161,26 +169,39 @@ func (s *server) validRequest(msg request, invoke bool) bool {
 type executionKey struct{}
 type execution struct {
 	request
-	path string
+	path  string
+	write *contract.WriteIntent
+	data  []byte
 }
 
 func (s *server) invoke(ctx context.Context, msg request) (contract.ToolReceipt, error) {
-	var path string
-	if s.cfg.Binding.Prepare != nil {
+	call := execution{request: msg}
+	if s.cfg.Identity.EvidenceRule == contract.AppendFileEvidenceV1 {
+		path, data, err := contract.ParseEvidenceAppend(msg.Tool.Arguments)
+		if err != nil {
+			return contract.ToolReceipt{}, err
+		}
+		call.path, call.data = path, data
+		call.write = &contract.WriteIntent{Key: msg.Key, Path: path, AppendHash: contract.HashBytes(data), AppendBytes: uint64(len(data)), Limits: msg.Limits,
+			RetainUntil: msg.Scope.Deadline.Add(s.cfg.EvidenceRetention).UTC()}
+	} else if s.cfg.Binding.Prepare != nil {
 		var err error
-		path, err = s.cfg.Binding.Prepare(msg.Tool.Arguments)
+		call.path, err = s.cfg.Binding.Prepare(msg.Tool.Arguments)
 		if err != nil {
 			return contract.ToolReceipt{}, err
 		}
 	}
-	if durable.ToolFingerprint(*msg.Tool, path) != msg.Key.Fingerprint {
+	if durable.ToolFingerprint(*msg.Tool, call.path) != msg.Key.Fingerprint {
 		return contract.ToolReceipt{}, contract.ErrInvalidRequest
 	}
 	// A disconnected response does not cancel the admitted operation or the journal commit.
 	ctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), msg.Scope.Deadline)
 	defer cancel()
 	ctx = contract.WithReceiptKey(ctx, msg.Key)
-	ctx = context.WithValue(ctx, executionKey{}, execution{request: msg, path: path})
+	ctx = context.WithValue(ctx, executionKey{}, call)
+	if call.write != nil {
+		return s.journal.InvokeWriteReceipt(ctx, msg.Key, *msg.Tool, *call.write)
+	}
 	return s.journal.InvokeReceipt(ctx, msg.Key, *msg.Tool)
 }
 
@@ -193,6 +214,9 @@ func (s *server) execute(ctx context.Context, req contract.ToolRequest) (result 
 		if err := s.cfg.Authority.AdmitRemote(ctx, call.Key, call.Scope, call.Owner, req, call.path); err != nil {
 			return result, cleanup, err
 		}
+	}
+	if call.write != nil {
+		return s.executeWrite(ctx, call, req)
 	}
 	spec := s.cfg.Binding.Spec
 	if err := s.verifyWorkspace(ctx, call.Scope); err != nil {

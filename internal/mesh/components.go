@@ -13,6 +13,9 @@ import (
 
 func (l *Local) SetComponents(tools map[contract.ToolRef]contract.LocalToolBinding, environments map[contract.EnvironmentRef]contract.EnvironmentProvider) error {
 	for ref, binding := range tools {
+		if remote, ok := binding.Tool.(*remotetool.Client); ok && remote != nil && remote.Identity().EvidenceRule != "" && binding.Prepare == nil {
+			return fmt.Errorf("%w: write evidence tool %q requires argument preparation", contract.ErrInvalidConfiguration, ref)
+		}
 		if ref == "" || nilBinding(binding.Tool) || !contract.JSONObject(binding.Spec.InputSchema) ||
 			binding.Spec.Limits.MaxResultBytes == 0 ||
 			(binding.Spec.NeedsWorkspaceWrite && !binding.Spec.NeedsReadAccess) ||

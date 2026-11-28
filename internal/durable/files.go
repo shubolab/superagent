@@ -24,7 +24,7 @@ func Directory(path string) error {
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return err
 	}
-	return syncDirectory(filepath.Dir(path))
+	return SyncDirectory(filepath.Dir(path))
 }
 
 func Digest(value any) (string, error) {
@@ -66,6 +66,11 @@ func Write(path string, value any) (renamed bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	return WriteBytes(path, data)
+}
+
+// WriteBytes atomically replaces a bounded file and syncs its parent directory.
+func WriteBytes(path string, data []byte) (renamed bool, err error) {
 	if len(data) > MaxRecordBytes {
 		return false, errRecordLimit
 	}
@@ -85,10 +90,10 @@ func Write(path string, value any) (renamed bool, err error) {
 	if err := os.Rename(f.Name(), path); err != nil {
 		return false, err
 	}
-	return true, syncDirectory(dir)
+	return true, SyncDirectory(dir)
 }
 
-func syncDirectory(path string) error {
+func SyncDirectory(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err

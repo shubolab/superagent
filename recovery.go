@@ -35,3 +35,10 @@ func NewLocalTakeoverEnvironment(workspaces map[WorkspaceRef]WorkspaceConfig) (E
 func PublishToolFile(ctx context.Context, req ToolRequest, path string, data []byte) error {
 	return contract.PublishToolFile(ctx, req, path, data)
 }
+
+type EvidenceWorkspaceConfig = environment.EvidenceWorkspaceConfig
+
+// NewLocalEvidenceEnvironment uses a private durable index as the workspace's published view.
+func NewLocalEvidenceEnvironment(workspaces map[WorkspaceRef]WorkspaceConfig, cfg EvidenceWorkspaceConfig) (EnvironmentProvider, error) {
+	return environment.NewEvidenceLocal(workspaces, cfg)
+}
