@@ -2,7 +2,6 @@ package run
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -37,22 +36,7 @@ func (r *Runner) SetTakeoverClock(clock func() (time.Time, error)) { r.leaseCloc
 func lockTransaction(ctx context.Context, path string) (*os.File, error) {
 	ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		f, err := durable.Lock(path)
-		if !errors.Is(err, durable.ErrLocked) {
-			return f, err
-		}
-		timer := time.NewTimer(2 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
+	return durable.LockContext(ctx, path)
 }
 
 // transact gives checkpoint writes, admission, publication and takeover one order.

@@ -84,7 +84,7 @@ func readCheckpoint(path string, id runIdentity) (checkpoint, error) {
 	}
 	if c.Format != 1 || c.Identity != id || c.Request.ID != id.ID || !c.Request.Recoverable ||
 		c.Deadline.IsZero() || c.BindingVersion == "" || c.ReconcileTimeout <= 0 ||
-		!validHistory(c.Messages) || len(c.Messages) == 0 || c.Messages[0].User == nil || *c.Messages[0].User != c.Request.Input ||
+		!ValidHistory(c.Messages) || len(c.Messages) == 0 || c.Messages[0].User == nil || *c.Messages[0].User != c.Request.Input ||
 		!c.validBalance() || !c.validOwner() ||
 		(c.Step == 0 && c.Result == nil) || (c.Result == nil) != c.FinishedAt.IsZero() ||
 		(c.Result != nil && (c.Result.RunID != id.ID || c.Result.Outcome == "")) ||

@@ -109,7 +109,7 @@ func New(cfg contract.RunnerConfig, models map[contract.ModelRef]struct{}, open 
 }
 
 func (r *Runner) Start(ctx context.Context, subject contract.SubjectID, req contract.StartRequest) (contract.RunID, error) {
-	if req.ID == "" || (req.Takeover && !req.Recoverable) || !utf8.ValidString(req.Instruction) || !utf8.ValidString(req.Input.Text) || !validHistory(req.History) {
+	if req.ID == "" || (req.Takeover && !req.Recoverable) || !utf8.ValidString(req.Instruction) || !utf8.ValidString(req.Input.Text) || !ValidHistory(req.History) {
 		return "", contract.ErrInvalidRequest
 	}
 	if _, ok := r.models[req.Model]; !ok {
@@ -122,10 +122,7 @@ func (r *Runner) Start(ctx context.Context, subject contract.SubjectID, req cont
 	if !ok {
 		return "", contract.ErrInvalidRequest
 	}
-	req.Environment = copyValue(req.Environment)
-	if req.Environment != nil && req.Environment.Ref == "" {
-		req.Environment.Ref = r.defaultEnvironment
-	}
+	req.Environment = r.normalizedEnvironment(req.Environment)
 	if err := r.admitTools(subject, req); err != nil {
 		return "", err
 	}
@@ -141,10 +138,7 @@ func (r *Runner) Start(ctx context.Context, subject contract.SubjectID, req cont
 	if policy != nil && !slices.Contains(req.Tools, policy.SourceTool) {
 		return "", contract.ErrAccessDenied
 	}
-	req.PinnedHistory = slices.Clone(req.PinnedHistory)
-	req.History = cloneMessages(req.History)
-	req.Tools = slices.Clone(req.Tools)
-	req.Budget = cloneBudget(req.Budget)
+	req = freezeStart(req)
 	key := runKey{subject: subject, id: req.ID}
 
 	r.mu.Lock()
@@ -249,7 +243,8 @@ func (r *Runner) Cancel(ctx context.Context, subject contract.SubjectID, id cont
 	return s.checkpointErr
 }
 
-func validHistory(history []contract.Message) bool {
+// ValidHistory checks message shape and complete tool batches in their original order.
+func ValidHistory(history []contract.Message) bool {
 	for i := 0; i < len(history); i++ {
 		m := history[i]
 		if m.Tool != nil {
@@ -278,6 +273,22 @@ func validHistory(history []contract.Message) bool {
 		}
 	}
 	return true
+}
+
+func (r *Runner) normalizedEnvironment(input *contract.EnvironmentRequirement) *contract.EnvironmentRequirement {
+	env := copyValue(input)
+	if env != nil && env.Ref == "" {
+		env.Ref = r.defaultEnvironment
+	}
+	return env
+}
+
+func freezeStart(req contract.StartRequest) contract.StartRequest {
+	req.PinnedHistory = slices.Clone(req.PinnedHistory)
+	req.History = cloneMessages(req.History)
+	req.Tools = slices.Clone(req.Tools)
+	req.Budget = cloneBudget(req.Budget)
+	return req
 }
 
 func cloneMessages(in []contract.Message) []contract.Message {
