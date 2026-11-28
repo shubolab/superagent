@@ -39,7 +39,15 @@ type attempt struct {
 	done   chan struct{}
 	permit *Permit
 	err    error
+	reused bool
 }
+
+type AdmissionPhase string
+
+const (
+	Queued    AdmissionPhase = "queued"
+	Admitting AdmissionPhase = "admitting"
+)
 
 func New(cfg contract.SessionSchedulingConfig) (*Scheduler, error) {
 	if cfg.MaxActiveRuns <= 0 || cfg.MaxQueuedRuns < 0 || cfg.MaxQueueWait < 0 ||
@@ -57,6 +65,11 @@ func New(cfg contract.SessionSchedulingConfig) (*Scheduler, error) {
 
 // Admit runs one start or recovery for a logical request. Concurrent retries share its reply.
 func (s *Scheduler) Admit(ctx context.Context, session Session, id contract.RunID, digest string, work func(context.Context) error) error {
+	return s.AdmitWithProgress(ctx, session, id, digest, nil, work)
+}
+
+// AdmitWithProgress reports actual admission transitions outside the scheduler lock.
+func (s *Scheduler) AdmitWithProgress(ctx context.Context, session Session, id contract.RunID, digest string, report func(AdmissionPhase), work func(context.Context) error) error {
 	a, owner, err := s.submit(ctx, session, id, digest)
 	if err != nil {
 		return err
@@ -70,10 +83,16 @@ func (s *Scheduler) Admit(ctx context.Context, session Session, id contract.RunI
 		}
 	}
 	if !a.expires.IsZero() {
+		if report != nil {
+			report(Queued)
+		}
 		s.wait(a)
 	}
 	if a.permit == nil {
 		return a.err
+	}
+	if report != nil && !a.reused {
+		report(Admitting)
 	}
 	err = work(context.WithValue(ctx, permitKey{}, a.permit))
 	s.mu.Lock()
@@ -106,6 +125,7 @@ func (s *Scheduler) submit(ctx context.Context, session Session, id contract.Run
 	}
 	a := &attempt{session: session, id: id, digest: digest, ctx: ctx, ready: make(chan struct{}), done: make(chan struct{})}
 	if p != nil || len(s.active) < s.cfg.MaxActiveRuns {
+		a.reused = p != nil
 		if p == nil {
 			p = s.acquireLocked(a)
 		}

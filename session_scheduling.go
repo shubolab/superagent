@@ -13,13 +13,16 @@ import (
 	"github.com/shubolab/superagent/internal/session"
 )
 
-func (s *Session) startScheduled(ctx context.Context, runner mesh.SessionRunner, req StartRequest) (*Run, error) {
+func (s *Session) startScheduled(ctx context.Context, runner mesh.SessionRunner, req StartRequest, digest string, report func(schedule.AdmissionPhase)) (*Run, error) {
 	if !s.store.Owns(req.ID) {
 		return nil, ErrSessionOwnership
 	}
-	req, digest, err := freezeScheduledRequest(req)
-	if err != nil {
-		return nil, err
+	if digest == "" {
+		var err error
+		req, digest, err = freezeScheduledRequest(req)
+		if err != nil {
+			return nil, err
+		}
 	}
 	idx, err := s.store.Load()
 	if err != nil {
@@ -44,7 +47,7 @@ func (s *Session) startScheduled(ctx context.Context, runner mesh.SessionRunner,
 			return s.start(ctx, runner, req)
 		}
 	}
-	return s.admitScheduled(ctx, runner, req.ID, digest, func(ctx context.Context) (*Run, error) {
+	return s.admitScheduled(ctx, runner, req.ID, digest, report, func(ctx context.Context) (*Run, error) {
 		return s.start(ctx, runner, req)
 	})
 }
@@ -83,14 +86,14 @@ func (s *Session) admitRecovery(ctx context.Context, runner mesh.SessionRunner, 
 		return nil, err
 	}
 	id := pending.Request.ID
-	return s.admitScheduled(ctx, runner, id, digest, func(ctx context.Context) (*Run, error) {
+	return s.admitScheduled(ctx, runner, id, digest, nil, func(ctx context.Context) (*Run, error) {
 		return s.recoverRun(ctx, runner, id)
 	})
 }
 
-func (s *Session) admitScheduled(ctx context.Context, runner mesh.SessionRunner, id RunID, digest string, work func(context.Context) (*Run, error)) (*Run, error) {
+func (s *Session) admitScheduled(ctx context.Context, runner mesh.SessionRunner, id RunID, digest string, report func(schedule.AdmissionPhase), work func(context.Context) (*Run, error)) (*Run, error) {
 	owner := schedule.Session{Subject: s.scope.Subject, ID: s.scope.Session}
-	err := runner.SessionScheduler().Admit(ctx, owner, id, digest, func(ctx context.Context) error {
+	err := runner.SessionScheduler().AdmitWithProgress(ctx, owner, id, digest, report, func(ctx context.Context) error {
 		_, err := work(ctx)
 		return err
 	})

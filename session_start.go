@@ -8,12 +8,17 @@ import (
 	"unicode/utf8"
 
 	"github.com/shubolab/superagent/internal/mesh"
+	"github.com/shubolab/superagent/internal/schedule"
 	"github.com/shubolab/superagent/internal/session"
 )
 
 // Start reserves this session's next Run and uses its committed history.
 // The caller supplies a NewRunID and the current input. The session owns History and Recoverable.
 func (s *Session) Start(ctx context.Context, req StartRequest) (*Run, error) {
+	return s.startSession(ctx, req, "", nil)
+}
+
+func (s *Session) startSession(ctx context.Context, req StartRequest, digest string, report func(schedule.AdmissionPhase)) (*Run, error) {
 	runner, err := s.runner(ctx)
 	if err != nil {
 		return nil, err
@@ -23,7 +28,7 @@ func (s *Session) Start(ctx context.Context, req StartRequest) (*Run, error) {
 	}
 	req.Recoverable = true
 	if runner.SessionScheduler() != nil {
-		return s.startScheduled(ctx, runner, req)
+		return s.startScheduled(ctx, runner, req, digest, report)
 	}
 	return s.start(ctx, runner, req)
 }
@@ -34,10 +39,19 @@ func (s *Session) start(ctx context.Context, runner mesh.SessionRunner, req Star
 		return nil, err
 	}
 	defer lock.Close()
-	if err := s.reserve(ctx, runner, req); err != nil {
+	created, err := s.reserve(ctx, runner, req)
+	if err != nil {
 		return nil, err
 	}
-	return s.resume(ctx, runner, req.ID)
+	run, err := s.resume(ctx, runner, req.ID)
+	if created && !errors.Is(err, ErrStartOutcomeUnknown) && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		defer cancel()
+		if cleanupErr := s.clearUnattempted(cleanup, req.ID); cleanupErr != nil {
+			err = errors.Join(ErrStartOutcomeUnknown, err, cleanupErr)
+		}
+	}
+	return run, err
 }
 
 // Recover reconciles the original pending Run against its retained local authority.
@@ -65,48 +79,62 @@ func (s *Session) recoverRun(ctx context.Context, runner mesh.SessionRunner, id 
 	return s.resume(ctx, runner, id)
 }
 
-func (s *Session) reserve(ctx context.Context, runner mesh.SessionRunner, req StartRequest) error {
+func (s *Session) reserve(ctx context.Context, runner mesh.SessionRunner, req StartRequest) (bool, error) {
+	lock, err := s.store.Lock(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer lock.Close()
+	idx, err := s.store.Load()
+	if err != nil {
+		return false, err
+	}
+	if _, committed := idx.Receipt(req.ID); committed {
+		return false, ErrStartConflict
+	}
+	if idx.Pending != nil {
+		if idx.Pending.Request.ID != req.ID {
+			return false, ErrSessionBusy
+		}
+		pending, err := idx.Awaiting(req.ID)
+		if err != nil {
+			return false, err
+		}
+		_, err = s.frozenRequest(runner, idx, pending, req)
+		return false, err
+	}
+	first, history, err := s.store.Window(idx)
+	if err != nil {
+		return false, err
+	}
+	binding, err := runner.SessionBinding(ctx)
+	if err != nil {
+		return false, err
+	}
+	pending := session.Pending{Version: idx.Version, FirstVersion: first, Binding: binding, Request: req}
+	req.History = history
+	pending.RequestDigest, err = runner.SessionRequestDigest(req)
+	if err != nil {
+		return false, err
+	}
+	if err := s.store.CheckCapacity(idx, pending); err != nil {
+		return false, err
+	}
+	idx.Pending = &pending
+	return true, s.store.Save(idx)
+}
+
+func (s *Session) clearUnattempted(ctx context.Context, id RunID) error {
 	lock, err := s.store.Lock(ctx)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
 	idx, err := s.store.Load()
-	if err != nil {
+	if err != nil || idx.Pending == nil || idx.Pending.Request.ID != id || idx.Pending.Attempted {
 		return err
 	}
-	if _, committed := idx.Receipt(req.ID); committed {
-		return ErrStartConflict
-	}
-	if idx.Pending != nil {
-		if idx.Pending.Request.ID != req.ID {
-			return ErrSessionBusy
-		}
-		pending, err := idx.Awaiting(req.ID)
-		if err != nil {
-			return err
-		}
-		_, err = s.frozenRequest(runner, idx, pending, req)
-		return err
-	}
-	first, history, err := s.store.Window(idx)
-	if err != nil {
-		return err
-	}
-	binding, err := runner.SessionBinding(ctx)
-	if err != nil {
-		return err
-	}
-	pending := session.Pending{Version: idx.Version, FirstVersion: first, Binding: binding, Request: req}
-	req.History = history
-	pending.RequestDigest, err = runner.SessionRequestDigest(req)
-	if err != nil {
-		return err
-	}
-	if err := s.store.CheckCapacity(idx, pending); err != nil {
-		return err
-	}
-	idx.Pending = &pending
+	idx.Pending = nil
 	return s.store.Save(idx)
 }
 
@@ -154,7 +182,10 @@ func (s *Session) resume(ctx context.Context, runner mesh.SessionRunner, id RunI
 	if probeErr != nil || status.Exists {
 		return nil, errors.Join(err, ErrStartOutcomeUnknown, probeErr)
 	}
-	return nil, errors.Join(err, s.setAttempted(cleanup, id, false))
+	if cleanupErr := s.setAttempted(cleanup, id, false); cleanupErr != nil {
+		return nil, errors.Join(err, ErrStartOutcomeUnknown, cleanupErr)
+	}
+	return nil, err
 }
 
 func (s *Session) checkedPendingRequest(ctx context.Context, runner mesh.SessionRunner, idx session.Index, pending session.Pending) (StartRequest, error) {

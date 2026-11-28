@@ -1,0 +1,404 @@
+// Package tui presents two SDK sessions in a local terminal.
+package tui
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+	"unicode"
+
+	sdk "github.com/shubolab/superagent"
+)
+
+type Config struct {
+	Client   *sdk.Client
+	Sessions [2]sdk.SessionID
+	Store    sdk.SessionConfig
+	Request  sdk.StartRequest
+}
+
+type services struct {
+	start   func(*sdk.Session, context.Context, sdk.StartRequest) <-chan sdk.StartUpdate
+	observe func(*sdk.Run, context.Context) (sdk.EventStream, error)
+	wait    func(*sdk.Run, context.Context) (sdk.Result, error)
+	cancel  func(*sdk.Run, context.Context) error
+	commit  func(*sdk.Session, context.Context, sdk.RunID) (sdk.SessionCommit, error)
+}
+
+type app struct {
+	cfg      Config
+	services services
+	ctx      context.Context
+	inbox    chan notification
+	views    [2]view
+	selected int
+}
+
+type view struct {
+	session *sdk.Session
+	draft   []rune
+	history []string
+	status  string
+	op      *operation
+}
+
+type operation struct {
+	id              sdk.RunID
+	input           string
+	startCancel     context.CancelFunc
+	observeCancel   context.CancelFunc
+	run             *sdk.Run
+	cancelRequested bool
+	cancelSent      bool
+	unknown         bool
+	waiting         bool
+	saving          bool
+	terminal        *sdk.Result
+	finalLines      []string
+	seq             uint64
+	preview         []preview
+	previewBytes    int
+	truncated       bool
+	interrupted     bool
+	tool            string
+}
+
+type target struct {
+	index int
+	id    sdk.RunID
+}
+
+type notification struct {
+	target
+	value any
+}
+
+type observationEnded struct{}
+type waitReply struct {
+	result sdk.Result
+	err    error
+}
+type saveReply struct {
+	receipt sdk.SessionCommit
+	err     error
+}
+type cancelReply struct{ err error }
+
+func open(ctx context.Context, cfg Config) (*app, error) {
+	if cfg.Client == nil || cfg.Sessions[0] == "" || cfg.Sessions[1] == "" || cfg.Sessions[0] == cfg.Sessions[1] || cfg.Request.Model == "" {
+		return nil, sdk.ErrInvalidConfiguration
+	}
+	a := &app{
+		cfg: cfg, ctx: ctx, inbox: make(chan notification, 64),
+		services: services{(*sdk.Session).StartWithProgress, (*sdk.Run).Observe, (*sdk.Run).Wait, (*sdk.Run).Cancel, (*sdk.Session).CommitRun},
+	}
+	for i, id := range cfg.Sessions {
+		session, err := cfg.Client.OpenSession(ctx, id, cfg.Store)
+		if err != nil {
+			return nil, fmt.Errorf("打开会话 %q: %w", id, err)
+		}
+		snapshot, err := session.Snapshot(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("读取会话 %q: %w", id, err)
+		}
+		v := &a.views[i]
+		*v = view{session: session, history: messageLines(snapshot.Messages), status: "空闲"}
+		if pending, err := session.PendingRun(ctx); err != nil {
+			return nil, err
+		} else if pending != "" {
+			v.status = "结果待核对"
+			v.op = &operation{id: pending, unknown: true, run: cfg.Client.Run(pending)}
+		}
+	}
+	return a, nil
+}
+
+func (a *app) key(key rune) {
+	v := &a.views[a.selected]
+	switch key {
+	case '\t':
+		a.selected = 1 - a.selected
+	case '\r', '\n':
+		a.submit(v)
+	case '\x1b':
+		a.stop(v)
+	case '\b', '\x7f':
+		if len(v.draft) > 0 && v.op == nil {
+			v.draft = v.draft[:len(v.draft)-1]
+		}
+	default:
+		if v.op == nil && len(v.draft) < 4096 && unicode.IsPrint(key) {
+			v.draft = append(v.draft, key)
+		}
+	}
+}
+
+func (a *app) submit(v *view) {
+	if v.op != nil {
+		if v.op.terminal != nil && !v.op.saving && v.status == "待保存" {
+			a.save(target{a.selected, v.op.id}, v)
+		}
+		return
+	}
+	input := string(v.draft)
+	if strings.TrimSpace(input) == "" {
+		return
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	id := v.session.NewRunID()
+	v.op = &operation{id: id, input: input, startCancel: cancel}
+	v.draft, v.status = nil, "启动中"
+	target := target{a.selected, id}
+	session := v.session
+	req := a.cfg.Request
+	req.ID, req.Input = id, sdk.UserMessage{Text: input}
+	go func() {
+		for update := range a.services.start(session, ctx, req) {
+			if !a.post(target, update) {
+				return
+			}
+		}
+	}()
+}
+
+func (a *app) stop(v *view) {
+	op := v.op
+	if op == nil || op.terminal != nil || op.cancelRequested {
+		return
+	}
+	op.cancelRequested = true
+	if !op.unknown {
+		v.status = "取消中"
+	}
+	target := target{a.selected, op.id}
+	if op.startCancel != nil {
+		op.startCancel()
+	}
+	if op.run != nil {
+		a.cancelRun(target, op)
+		if op.unknown {
+			a.waitRun(target, op)
+		}
+	}
+}
+
+func (a *app) post(target target, value any) bool {
+	select {
+	case a.inbox <- notification{target, value}:
+		return true
+	case <-a.ctx.Done():
+		return false
+	}
+}
+
+func (a *app) apply(n notification) {
+	v := &a.views[n.index]
+	op := v.op
+	if op == nil || op.id != n.id {
+		return
+	}
+	switch value := n.value.(type) {
+	case sdk.StartUpdate:
+		if value.RunID == n.id && op.startCancel != nil {
+			a.admission(n.target, v, value)
+		}
+	case sdk.Event:
+		if value.RunID == n.id && op.terminal == nil && value.Seq > op.seq {
+			op.seq = value.Seq
+			op.observe(value)
+		}
+	case observationEnded:
+		if op.terminal == nil {
+			op.interrupted = true
+		}
+	case waitReply:
+		a.finish(n.target, v, value)
+	case saveReply:
+		if !op.saving || op.terminal == nil {
+			return
+		}
+		if value.err != nil || value.receipt.RunID != op.id {
+			op.saving, v.status = false, "待保存"
+			return
+		}
+		v.history = historyTail(v.history, op.finalLines)
+		v.status, v.op = outcomeLabel(op.terminal.Outcome), nil
+	case cancelReply:
+		if op.terminal == nil {
+			if value.err != nil {
+				if !op.unknown {
+					v.status = "取消请求失败"
+				}
+				op.cancelRequested, op.cancelSent = false, false
+			} else if op.unknown {
+				v.status = "取消中"
+				a.waitRun(n.target, op)
+			}
+		}
+	}
+}
+
+func (a *app) admission(target target, v *view, update sdk.StartUpdate) {
+	op := v.op
+	if update.Phase != sdk.StartResolved {
+		if !op.cancelRequested {
+			switch update.Phase {
+			case sdk.StartQueued:
+				if v.status == "启动中" {
+					v.status = "排队中"
+				}
+			case sdk.StartAdmitting:
+				if v.status == "启动中" || v.status == "排队中" {
+					v.status = "受理中"
+				}
+			}
+		}
+		return
+	}
+	op.startCancel()
+	op.startCancel = nil
+	if update.Err != nil {
+		if errors.Is(update.Err, sdk.ErrStartOutcomeUnknown) || errors.Is(update.Err, sdk.ErrSessionResultUnavailable) {
+			a.checkAdmission(target, v)
+			return
+		}
+		v.draft, v.op = []rune(op.input), nil
+		switch {
+		case errors.Is(update.Err, sdk.ErrScheduleQueueFull):
+			v.status = "队列已满"
+		case errors.Is(update.Err, sdk.ErrScheduleQueueTimeout), errors.Is(update.Err, context.DeadlineExceeded):
+			v.status = "等待超时"
+		case errors.Is(update.Err, context.Canceled):
+			v.status = "等待已取消"
+		default:
+			v.status = "启动失败"
+		}
+		return
+	}
+	if update.Run == nil || update.Run.ID() != target.id {
+		a.checkAdmission(target, v)
+		return
+	}
+	op.run = update.Run
+	v.status = "运行中"
+	if op.cancelRequested {
+		v.status = "取消中"
+		a.cancelRun(target, op)
+	}
+	a.observeRun(target, op)
+	a.waitRun(target, op)
+}
+
+func (a *app) checkAdmission(target target, v *view) {
+	op := v.op
+	op.unknown, v.status = true, "受理待核对"
+	op.run = a.cfg.Client.Run(op.id)
+	if op.cancelRequested {
+		a.cancelRun(target, op)
+	}
+	a.waitRun(target, op)
+}
+
+func (a *app) observeRun(target target, op *operation) {
+	ctx, cancel := context.WithCancel(a.ctx)
+	op.observeCancel = cancel
+	run := op.run
+	go func() {
+		defer cancel()
+		stream, err := a.services.observe(run, ctx)
+		if err != nil {
+			a.post(target, observationEnded{})
+			return
+		}
+		defer stream.Close()
+		for {
+			event, err := stream.Recv()
+			if err != nil {
+				if !errors.Is(err, io.EOF) && ctx.Err() == nil {
+					a.post(target, observationEnded{})
+				}
+				return
+			}
+			if !a.post(target, event) {
+				return
+			}
+		}
+	}()
+}
+
+func (a *app) waitRun(target target, op *operation) {
+	if op.waiting {
+		return
+	}
+	op.waiting = true
+	run := op.run
+	go func() {
+		result, err := a.services.wait(run, a.ctx)
+		a.post(target, waitReply{result, err})
+	}()
+}
+
+func (a *app) cancelRun(target target, op *operation) {
+	if op.cancelSent {
+		return
+	}
+	op.cancelSent = true
+	run := op.run
+	go func() {
+		ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
+		defer cancel()
+		a.post(target, cancelReply{a.services.cancel(run, ctx)})
+	}()
+}
+
+func (a *app) finish(target target, v *view, reply waitReply) {
+	op := v.op
+	op.waiting = false
+	if op.terminal != nil {
+		return
+	}
+	if reply.err != nil || reply.result.RunID != op.id {
+		if !op.unknown {
+			v.status = "结果待核对"
+		}
+		return
+	}
+	op.terminal = &reply.result
+	op.finalLines = messageLines(reply.result.Messages)
+	op.preview, op.interrupted, op.truncated, op.tool = nil, false, false, ""
+	if op.observeCancel != nil {
+		op.observeCancel()
+	}
+	a.save(target, v)
+}
+
+func (a *app) save(target target, v *view) {
+	v.op.saving, v.status = true, "保存中"
+	session := v.session
+	go func() {
+		ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+		defer cancel()
+		receipt, err := a.services.commit(session, ctx, target.id)
+		a.post(target, saveReply{receipt, err})
+	}()
+}
+
+func outcomeLabel(outcome sdk.RunOutcome) string {
+	switch outcome {
+	case sdk.Succeeded:
+		return "已完成"
+	case sdk.Cancelled:
+		return "已取消"
+	case sdk.TimedOut:
+		return "运行超时"
+	case sdk.BudgetExceeded:
+		return "预算已用尽"
+	case sdk.ToolOutcomeUnknown:
+		return "工具结果待核对"
+	default:
+		return "运行失败"
+	}
+}

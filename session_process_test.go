@@ -167,7 +167,7 @@ func TestStageCSessionChild(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.reserve(ctx, runner, req); err != nil {
+		if _, err := s.reserve(ctx, runner, req); err != nil {
 			t.Fatal(err)
 		}
 		sessionLog(t, root, "session-ids", req.ID)
@@ -249,7 +249,7 @@ func TestStageCSessionC2RecoverAdmission(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.reserve(ctx, runner, req); err != nil {
+		if _, err := s.reserve(ctx, runner, req); err != nil {
 			t.Fatal(err)
 		}
 		changed := req
